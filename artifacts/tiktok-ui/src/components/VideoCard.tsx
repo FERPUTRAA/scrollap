@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Heart, MessageCircle, Share2, Music } from "lucide-react";
+import { Heart, MessageCircle, Share2, Music, Eye } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface Video {
@@ -11,12 +11,17 @@ interface Video {
   likes: string;
   comments: string;
   shares: string;
-  bgColor: string;
+  bgColor?: string;
+  coverUrl?: string;
   avatarUrl: string;
+  streamUrl?: string;
+  viewers?: number;
+  isLive?: boolean;
 }
 
 interface VideoCardProps {
   video: Video;
+  index?: number;
 }
 
 export default function VideoCard({ video }: VideoCardProps) {
@@ -32,17 +37,29 @@ export default function VideoCard({ video }: VideoCardProps) {
 
   return (
     <div
-      className="relative w-full h-full select-none"
-      style={{ background: video.bgColor }}
+      className="relative w-full h-full select-none overflow-hidden"
+      style={
+        video.coverUrl
+          ? undefined
+          : { background: video.bgColor ?? "linear-gradient(135deg, #1a1a2e, #0f3460)" }
+      }
       onDoubleClick={handleDoubleTap}
       data-testid={`video-card-${video.id}`}
     >
-      {/* Simulated video overlay pattern */}
-      <div className="absolute inset-0 opacity-20"
-        style={{
-          backgroundImage: "radial-gradient(circle at 30% 70%, rgba(255,255,255,0.3) 0%, transparent 60%)",
-        }}
-      />
+      {/* Cover image background */}
+      {video.coverUrl && (
+        <img
+          src={video.coverUrl}
+          alt={video.username}
+          className="absolute inset-0 w-full h-full object-cover"
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = "none";
+          }}
+        />
+      )}
+
+      {/* Dark overlay for readability */}
+      <div className="absolute inset-0 bg-black/20" />
 
       {/* Double-tap heart animation */}
       <AnimatePresence>
@@ -59,25 +76,44 @@ export default function VideoCard({ video }: VideoCardProps) {
         )}
       </AnimatePresence>
 
-      {/* Bottom gradient overlay */}
+      {/* Bottom gradient */}
       <div
-        className="absolute bottom-0 left-0 right-0 h-[55%] pointer-events-none z-10"
+        className="absolute bottom-0 left-0 right-0 h-[60%] pointer-events-none z-10"
         style={{
-          background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 50%, transparent 100%)"
+          background: "linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.5) 50%, transparent 100%)",
         }}
       />
+
+      {/* LIVE badge top-left */}
+      {video.isLive && (
+        <div className="absolute top-[65px] left-4 z-20 flex items-center gap-1.5">
+          <span
+            className="flex items-center gap-1 px-2 py-0.5 rounded-sm text-white text-[11px] font-bold uppercase"
+            style={{ background: "#EE1D52" }}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+            Live
+          </span>
+          {video.viewers !== undefined && video.viewers > 0 && (
+            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/50 text-white text-[10px] font-semibold backdrop-blur-sm">
+              <Eye size={10} />
+              {video.likes}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Right action buttons */}
       <div className="absolute right-3 bottom-[70px] z-20 flex flex-col items-center gap-5">
         {/* Avatar + Follow */}
         <div className="relative flex flex-col items-center mb-2">
-          <div className="w-11 h-11 rounded-full border-2 border-white overflow-hidden bg-gray-500">
+          <div className="w-11 h-11 rounded-full border-2 border-white overflow-hidden bg-gray-700">
             <img
               src={video.avatarUrl}
               alt={video.username}
               className="w-full h-full object-cover"
               onError={(e) => {
-                (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${video.username}&background=random&color=fff&size=44`;
+                (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(video.username)}&background=EE1D52&color=fff&size=44`;
               }}
             />
           </div>
