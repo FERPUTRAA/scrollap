@@ -25,3 +25,12 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+
+## Artifacts
+
+- **tiktok-ui** (`artifacts/tiktok-ui/`, preview `/`) — TikTok-clone UI, frontend-only React+Vite app
+  - 5-tab bottom nav: Home feed, Discover, Create, Inbox, Profile
+  - Vertical scroll-snap video feed with like/comment/share actions
+  - All mock/static data — no backend
+
+- **api-server** (`artifacts/api-server/`, preview `/api`) — Express 5 API server (unused for tiktok-ui)
