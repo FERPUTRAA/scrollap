@@ -26,3 +26,9 @@ externalPort = 8080
 [[ports]]
 localPort = 20677
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+HOT51_PROXY_URL = "http://157.20.219.184:5555"
+HOT51_STREAM_KEY = "4ad75f5e2eb06d315ea14e8484a29e1d"

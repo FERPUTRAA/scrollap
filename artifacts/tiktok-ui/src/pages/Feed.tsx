@@ -1,13 +1,11 @@
 import React, { useState, useEffect } from "react";
-import { Search, RefreshCw, Radio } from "lucide-react";
-import { MOCK_VIDEOS } from "../data/mock";
+import { RefreshCw, Radio, WifiOff, AlertCircle } from "lucide-react";
 import VideoCard from "../components/VideoCard";
 
 interface LiveRoom {
   id: string;
   name: string;
   viewers: number;
-  game: string;
   cover: string;
   avatar: string;
   liveName: string;
@@ -20,7 +18,7 @@ interface ApiResponse {
   rooms?: LiveRoom[];
   total?: number;
   source?: string;
-  apiError?: string;
+  error?: string;
   hint?: string;
 }
 
@@ -62,43 +60,36 @@ function mapRoomToVideo(room: LiveRoom, index: number) {
   };
 }
 
-function mapMockToVideo(v: (typeof MOCK_VIDEOS)[0]) {
-  return {
-    ...v,
-    coverUrl: undefined as string | undefined,
-    streamUrl: "",
-    streamProxyUrl: "",
-    viewers: 0,
-    isLive: false,
-    bgColor: v.bgColor,
-  };
-}
-
 type FeedTab = "ForYou" | "Following";
+type FeedStatus = "loading" | "ok" | "error";
 
 export default function Feed() {
   const [activeTab, setActiveTab] = useState<FeedTab>("ForYou");
   const [videos, setVideos] = useState<ReturnType<typeof mapRoomToVideo>[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [source, setSource] = useState<"api" | "demo" | "mock" | null>(null);
+  const [status, setStatus] = useState<FeedStatus>("loading");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [hint, setHint] = useState("");
+  const [total, setTotal] = useState(0);
 
   const fetchRooms = async () => {
-    setLoading(true);
+    setStatus("loading");
     try {
       const res = await fetch("/api/live-rooms?limit=30");
       const data: ApiResponse = await res.json();
 
       if (data.success && data.rooms && data.rooms.length > 0) {
         setVideos(data.rooms.map(mapRoomToVideo));
-        setSource((data.source as "api" | "demo") ?? "api");
+        setTotal(data.total ?? data.rooms.length);
+        setStatus("ok");
+        setErrorMsg("");
       } else {
-        throw new Error("No rooms");
+        throw new Error(data.error ?? "Tidak ada room ditemukan");
       }
-    } catch {
-      setVideos(MOCK_VIDEOS.map(mapMockToVideo));
-      setSource("mock");
-    } finally {
-      setLoading(false);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Gagal memuat data";
+      setErrorMsg(msg);
+      setHint("Pastikan HOT51_PROXY_URL diset ke proxy Indonesia yang aktif.");
+      setStatus("error");
     }
   };
 
@@ -110,6 +101,7 @@ export default function Feed() {
 
   return (
     <div className="relative h-full w-full bg-black">
+
       {/* Top Nav */}
       <div
         className="absolute top-0 left-0 right-0 z-20 flex justify-between items-center px-4 pt-12 pb-4 pointer-events-none"
@@ -119,14 +111,12 @@ export default function Feed() {
 
         <div className="flex gap-5 items-center font-bold text-[15px] drop-shadow pointer-events-auto">
           <button
-            data-testid="tab-following"
             onClick={() => setActiveTab("Following")}
             className={`transition-colors ${activeTab === "Following" ? "text-white" : "text-white/50"}`}
           >
             Following
           </button>
           <button
-            data-testid="tab-foryou"
             onClick={() => setActiveTab("ForYou")}
             className="relative text-white"
           >
@@ -138,35 +128,58 @@ export default function Feed() {
         </div>
 
         <div className="flex-1 flex items-center justify-end gap-2 pointer-events-auto">
-          {/* Source badge */}
-          {source === "api" && (
+          {status === "ok" && (
             <span className="flex items-center gap-1">
               <Radio size={12} color="#69C9D0" />
-              <span className="text-[10px] text-[#69C9D0] font-bold">LIVE</span>
+              <span className="text-[10px] text-[#69C9D0] font-bold">LIVE {total > 0 && `· ${formatCount(total)}`}</span>
             </span>
           )}
-          {source === "demo" && (
-            <span className="text-[9px] text-white/40 font-medium bg-white/10 px-1.5 py-0.5 rounded-full">DEMO</span>
-          )}
-          <button data-testid="button-search-refresh" onClick={fetchRooms} className="p-1">
-            {loading
+          <button onClick={fetchRooms} className="p-1">
+            {status === "loading"
               ? <RefreshCw size={19} color="white" className="animate-spin" />
-              : <Search size={19} color="white" />
+              : <RefreshCw size={19} color="white" />
             }
           </button>
         </div>
       </div>
 
       {/* Loading */}
-      {loading && videos.length === 0 && (
+      {status === "loading" && videos.length === 0 && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3">
-          <div className="w-10 h-10 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: "#EE1D52 transparent transparent transparent" }} />
+          <div
+            className="w-10 h-10 rounded-full border-2 border-t-transparent animate-spin"
+            style={{ borderColor: "#EE1D52 transparent transparent transparent" }}
+          />
           <p className="text-white/50 text-sm">Memuat live rooms...</p>
         </div>
       )}
 
+      {/* Error state */}
+      {status === "error" && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 px-8">
+          <div className="flex items-center justify-center w-16 h-16 rounded-full bg-white/10">
+            <WifiOff size={32} color="#EE1D52" />
+          </div>
+          <p className="text-white text-base font-semibold text-center">Tidak bisa terhubung ke Hot51</p>
+          <div className="bg-white/10 rounded-xl px-4 py-3 w-full max-w-xs">
+            <p className="text-white/60 text-xs text-center leading-relaxed flex items-start gap-1.5">
+              <AlertCircle size={12} className="mt-0.5 shrink-0 text-yellow-400" />
+              <span>{errorMsg}</span>
+            </p>
+          </div>
+          <p className="text-white/40 text-[11px] text-center leading-relaxed max-w-xs">{hint}</p>
+          <button
+            onClick={fetchRooms}
+            className="mt-2 px-6 py-2.5 rounded-full text-sm font-bold text-white"
+            style={{ background: "#EE1D52" }}
+          >
+            Coba Lagi
+          </button>
+        </div>
+      )}
+
       {/* Video feed */}
-      {videos.length > 0 && (
+      {status === "ok" && videos.length > 0 && (
         <div
           className="h-full w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar"
           style={{ scrollBehavior: "smooth" }}
