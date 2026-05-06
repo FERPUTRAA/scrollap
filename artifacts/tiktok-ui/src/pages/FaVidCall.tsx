@@ -1,83 +1,61 @@
-import React, { useState } from "react";
-import { Phone, MapPin, Heart, Share2, UserPlus, Mic, MicOff, Video, VideoOff } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { Phone, MapPin, Heart, Share2, UserPlus, Mic, MicOff, Video, Users, RefreshCw, WifiOff } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+
+interface LiveRoom {
+  id: string;
+  anchorId?: string;
+  liveId?: string;
+  name: string;
+  viewers: number;
+  cover: string;
+  avatar: string;
+  liveName: string;
+  streamUrl: string;
+  streamProxyUrl: string;
+  hasAuth?: boolean;
+}
 
 interface VidCallCard {
   id: string;
   callerName: string;
   callerHandle: string;
   callerAvatar: string;
-  receiverName: string;
-  receiverAvatar: string;
-  distance: string;
-  duration: string;
-  bg: string;
+  callerCover: string;
+  viewers: number;
   topic: string;
+  bg: string;
 }
 
-// Placeholder cards — no logic, no API. Data real datang dari server terpisah.
-const PLACEHOLDER_CARDS: VidCallCard[] = [
-  {
-    id: "1",
-    callerName: "Rina Sari",
-    callerHandle: "@rina_sari",
-    callerAvatar: "https://i.pravatar.cc/150?img=47",
-    receiverName: "Budi W.",
-    receiverAvatar: "https://i.pravatar.cc/150?img=15",
-    distance: "1.2 km",
-    duration: "12:34",
-    bg: "linear-gradient(160deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%)",
-    topic: "Ngobrol santai sore hari",
-  },
-  {
-    id: "2",
-    callerName: "Dewi Ayu",
-    callerHandle: "@dewi_ayu",
-    callerAvatar: "https://i.pravatar.cc/150?img=5",
-    receiverName: "Agus R.",
-    receiverAvatar: "https://i.pravatar.cc/150?img=52",
-    distance: "0.8 km",
-    duration: "04:12",
-    bg: "linear-gradient(160deg,#0f2027 0%,#203a43 50%,#2c5364 100%)",
-    topic: "Diskusi project bareng",
-  },
-  {
-    id: "3",
-    callerName: "Sinta P.",
-    callerHandle: "@sinta_p",
-    callerAvatar: "https://i.pravatar.cc/150?img=9",
-    receiverName: "Reza M.",
-    receiverAvatar: "https://i.pravatar.cc/150?img=60",
-    distance: "2.5 km",
-    duration: "28:01",
-    bg: "linear-gradient(160deg,#2d1b69 0%,#1a0533 50%,#11998e 100%)",
-    topic: "Nonton bareng online",
-  },
-  {
-    id: "4",
-    callerName: "Fani K.",
-    callerHandle: "@fani_k",
-    callerAvatar: "https://i.pravatar.cc/150?img=44",
-    receiverName: "Hendra S.",
-    receiverAvatar: "https://i.pravatar.cc/150?img=33",
-    distance: "500 m",
-    duration: "01:55",
-    bg: "linear-gradient(160deg,#1f1c2c 0%,#3a1f5e 50%,#928dab 100%)",
-    topic: "Rencana makan malam",
-  },
-  {
-    id: "5",
-    callerName: "Citra L.",
-    callerHandle: "@citra_l",
-    callerAvatar: "https://i.pravatar.cc/150?img=1",
-    receiverName: "Doni A.",
-    receiverAvatar: "https://i.pravatar.cc/150?img=25",
-    distance: "3.1 km",
-    duration: "07:48",
-    bg: "linear-gradient(160deg,#141e30 0%,#0a2342 50%,#243b55 100%)",
-    topic: "Latihan musik bersama",
-  },
+const GRADIENT_FALLBACKS = [
+  "linear-gradient(160deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%)",
+  "linear-gradient(160deg,#0f2027 0%,#203a43 50%,#2c5364 100%)",
+  "linear-gradient(160deg,#2d1b69 0%,#1a0533 50%,#11998e 100%)",
+  "linear-gradient(160deg,#1f1c2c 0%,#3a1f5e 50%,#928dab 100%)",
+  "linear-gradient(160deg,#141e30 0%,#0a2342 50%,#243b55 100%)",
+  "linear-gradient(160deg,#0f0c29 0%,#302b63 50%,#24243e 100%)",
 ];
+
+function formatViewers(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function mapRoomToCard(room: LiveRoom, index: number): VidCallCard {
+  return {
+    id: room.id,
+    callerName: room.name,
+    callerHandle: "@" + room.name.toLowerCase().replace(/[^a-z0-9]/g, "_"),
+    callerAvatar: room.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(room.name)}&background=EE1D52&color=fff&size=150`,
+    callerCover: room.cover || "",
+    viewers: room.viewers,
+    topic: room.liveName || `${room.name} sedang live!`,
+    bg: room.cover ? "" : GRADIENT_FALLBACKS[index % GRADIENT_FALLBACKS.length],
+  };
+}
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 function VidCallCardItem({ card }: { card: VidCallCard }) {
   const [liked, setLiked] = useState(false);
@@ -93,10 +71,23 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
   return (
     <div
       className="relative w-full h-full select-none overflow-hidden"
-      style={{ background: card.bg }}
+      style={
+        card.callerCover
+          ? { background: "#000" }
+          : { background: card.bg }
+      }
       onDoubleClick={handleDoubleTap}
     >
-      {/* Ambient blobs untuk efek video call */}
+      {/* Background cover image */}
+      {card.callerCover && (
+        <img
+          src={card.callerCover}
+          alt={card.callerName}
+          className="absolute inset-0 w-full h-full object-cover opacity-50"
+        />
+      )}
+
+      {/* Ambient blobs */}
       <div
         className="absolute top-[15%] left-[10%] w-48 h-48 rounded-full opacity-20 blur-3xl pointer-events-none"
         style={{ background: "#69C9D0" }}
@@ -138,15 +129,16 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[11px] font-semibold"
             style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }}
           >
-            <MapPin size={10} />
-            {card.distance}
+            <Users size={10} />
+            {formatViewers(card.viewers)}
           </span>
         </div>
         <span
-          className="text-white text-[12px] font-mono font-semibold px-2.5 py-1 rounded-full"
-          style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }}
+          className="flex items-center gap-1 text-white text-[10px] font-bold px-2.5 py-1 rounded-full"
+          style={{ background: "rgba(34,197,94,0.35)", border: "1px solid rgba(34,197,94,0.5)" }}
         >
-          {card.duration}
+          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+          LIVE
         </span>
       </div>
 
@@ -166,9 +158,12 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
           transition={{ duration: 0.4 }}
         >
           <img
-            src={card.callerAvatar}
+            src={card.callerCover || card.callerAvatar}
             alt={card.callerName}
-            className="absolute inset-0 w-full h-full object-cover opacity-60"
+            className="absolute inset-0 w-full h-full object-cover opacity-70"
+            onError={(e) => {
+              (e.target as HTMLImageElement).src = card.callerAvatar;
+            }}
           />
           <div
             className="absolute inset-0"
@@ -178,7 +173,6 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
             <Mic size={12} color="white" />
             <span className="text-white text-xs font-semibold">{card.callerName}</span>
           </div>
-          {/* Pulse ring — active speaking */}
           <div className="absolute top-3 right-3">
             <span className="relative flex h-3 w-3">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
@@ -187,7 +181,7 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
           </div>
         </motion.div>
 
-        {/* Secondary caller (receiver) - smaller */}
+        {/* Viewer panel (you) */}
         <motion.div
           className="relative rounded-2xl overflow-hidden self-end"
           style={{
@@ -201,18 +195,21 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.4, delay: 0.1 }}
         >
-          <img
-            src={card.receiverAvatar}
-            alt={card.receiverName}
-            className="absolute inset-0 w-full h-full object-cover opacity-60"
-          />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div
+              className="w-10 h-10 rounded-full flex items-center justify-center"
+              style={{ background: "rgba(255,255,255,0.15)" }}
+            >
+              <MicOff size={16} color="rgba(255,255,255,0.6)" />
+            </div>
+          </div>
           <div
             className="absolute inset-0"
             style={{ background: "linear-gradient(to top, rgba(0,0,0,0.7) 0%, transparent 60%)" }}
           />
           <div className="absolute bottom-2 left-2 flex items-center gap-1">
             <MicOff size={10} color="rgba(255,255,255,0.7)" />
-            <span className="text-white/70 text-[10px] font-semibold">{card.receiverName}</span>
+            <span className="text-white/70 text-[10px] font-semibold">Kamu</span>
           </div>
         </motion.div>
       </div>
@@ -225,10 +222,16 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
 
       {/* Right action buttons */}
       <div className="absolute right-3 bottom-[70px] z-20 flex flex-col items-center gap-5">
-        {/* Caller avatar */}
         <div className="relative mb-1">
           <div className="w-11 h-11 rounded-full border-2 border-white overflow-hidden bg-gray-700">
-            <img src={card.callerAvatar} alt={card.callerName} className="w-full h-full object-cover" />
+            <img
+              src={card.callerAvatar}
+              alt={card.callerName}
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(card.callerName)}&background=EE1D52&color=fff&size=44`;
+              }}
+            />
           </div>
           <button
             className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full flex items-center justify-center text-white text-sm font-bold"
@@ -238,7 +241,6 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
           </button>
         </div>
 
-        {/* Like */}
         <motion.button
           className="flex flex-col items-center gap-1 mt-2"
           whileTap={{ scale: 1.3 }}
@@ -253,13 +255,11 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
           <span className="text-white text-xs font-semibold drop-shadow">Suka</span>
         </motion.button>
 
-        {/* Share */}
         <button className="flex flex-col items-center gap-1">
           <Share2 size={30} color="white" strokeWidth={1.5} />
           <span className="text-white text-xs font-semibold drop-shadow">Bagikan</span>
         </button>
 
-        {/* Join call */}
         <motion.button
           className="flex flex-col items-center gap-1"
           whileTap={{ scale: 0.92 }}
@@ -282,16 +282,45 @@ function VidCallCardItem({ card }: { card: VidCallCard }) {
           {card.topic}
         </p>
         <div className="flex items-center gap-2">
-          <MapPin size={11} color="rgba(255,255,255,0.7)" />
-          <p className="text-white/70 text-xs drop-shadow">Terdekat · {card.distance}</p>
+          <Users size={11} color="rgba(255,255,255,0.7)" />
+          <p className="text-white/70 text-xs drop-shadow">{formatViewers(card.viewers)} penonton</p>
         </div>
       </div>
     </div>
   );
 }
 
+type PageStatus = "loading" | "ok" | "error";
+
 export default function FaVidCall() {
-  const [activeTab, setActiveTab] = useState<"Nearby" | "All">("Nearby");
+  const [activeTab, setActiveTab] = useState<"Nearby" | "All">("All");
+  const [cards, setCards] = useState<VidCallCard[]>([]);
+  const [status, setStatus] = useState<PageStatus>("loading");
+  const [errorMsg, setErrorMsg] = useState("");
+
+  const fetchRooms = useCallback(async () => {
+    setStatus("loading");
+    try {
+      const res = await fetch(`${BASE}/api/live-rooms?limit=30`);
+      const data = await res.json();
+      if (data.success && data.rooms && data.rooms.length > 0) {
+        setCards((data.rooms as LiveRoom[]).map(mapRoomToCard));
+        setStatus("ok");
+        setErrorMsg("");
+      } else {
+        throw new Error(data.error ?? "Tidak ada live room aktif saat ini");
+      }
+    } catch (err: unknown) {
+      setErrorMsg(err instanceof Error ? err.message : "Gagal memuat data");
+      setStatus("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRooms();
+    const iv = setInterval(fetchRooms, 60_000);
+    return () => clearInterval(iv);
+  }, [fetchRooms]);
 
   return (
     <div className="relative h-full w-full bg-black">
@@ -317,9 +346,6 @@ export default function FaVidCall() {
             {activeTab === "All" && (
               <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-6 h-0.5 bg-white rounded-full" />
             )}
-            {activeTab === "Nearby" && (
-              <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 hidden" />
-            )}
           </button>
         </div>
         <div className="flex-1 flex justify-end">
@@ -333,24 +359,43 @@ export default function FaVidCall() {
         </div>
       </div>
 
-      {/* Active tab underline for Nearby */}
-      {activeTab === "Nearby" && (
-        <div className="absolute z-30" style={{ top: "calc(48px + 1.5rem + 15px + 3rem)", left: "50%", transform: "translateX(calc(-50% - 2.5rem))" }}>
-          <div className="w-6 h-0.5 bg-white rounded-full" />
+      {/* Loading state */}
+      {status === "loading" && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-4">
+          <RefreshCw size={36} color="white" className="animate-spin" />
+          <p className="text-white/70 text-sm">Memuat video call live...</p>
+        </div>
+      )}
+
+      {/* Error state */}
+      {status === "error" && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-4 px-8">
+          <WifiOff size={40} color="rgba(255,255,255,0.5)" />
+          <p className="text-white/70 text-sm text-center">{errorMsg}</p>
+          <button
+            onClick={fetchRooms}
+            className="px-5 py-2 rounded-full text-white text-sm font-semibold flex items-center gap-2"
+            style={{ background: "#EE1D52" }}
+          >
+            <RefreshCw size={14} />
+            Coba Lagi
+          </button>
         </div>
       )}
 
       {/* Vertical snap scroll feed */}
-      <div
-        className="h-full w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar"
-        style={{ scrollBehavior: "smooth" }}
-      >
-        {PLACEHOLDER_CARDS.map((card) => (
-          <div key={card.id} className="snap-start snap-always h-full w-full relative">
-            <VidCallCardItem card={card} />
-          </div>
-        ))}
-      </div>
+      {status === "ok" && (
+        <div
+          className="h-full w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar"
+          style={{ scrollBehavior: "smooth" }}
+        >
+          {cards.map((card) => (
+            <div key={card.id} className="snap-start snap-always h-full w-full relative">
+              <VidCallCardItem card={card} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
