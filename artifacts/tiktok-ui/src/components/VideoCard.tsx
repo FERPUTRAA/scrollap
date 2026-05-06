@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Heart, MessageCircle, Share2, Music, Eye } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import LivePlayer from "./LivePlayer";
 
 interface Video {
   id: string;
@@ -15,6 +16,7 @@ interface Video {
   coverUrl?: string;
   avatarUrl: string;
   streamUrl?: string;
+  streamProxyUrl?: string;
   viewers?: number;
   isLive?: boolean;
 }
@@ -39,15 +41,23 @@ export default function VideoCard({ video }: VideoCardProps) {
     <div
       className="relative w-full h-full select-none overflow-hidden"
       style={
-        video.coverUrl
+        video.coverUrl || (video.isLive && video.streamUrl)
           ? undefined
           : { background: video.bgColor ?? "linear-gradient(135deg, #1a1a2e, #0f3460)" }
       }
       onDoubleClick={handleDoubleTap}
       data-testid={`video-card-${video.id}`}
     >
-      {/* Cover image background */}
-      {video.coverUrl && (
+      {/* Live stream player */}
+      {video.isLive && video.streamUrl ? (
+        <LivePlayer
+          roomId={video.id}
+          streamUrl={video.streamUrl}
+          streamProxyUrl={video.streamProxyUrl}
+          cover={video.coverUrl}
+          className="absolute inset-0"
+        />
+      ) : video.coverUrl ? (
         <img
           src={video.coverUrl}
           alt={video.username}
@@ -56,10 +66,10 @@ export default function VideoCard({ video }: VideoCardProps) {
             (e.target as HTMLImageElement).style.display = "none";
           }}
         />
-      )}
+      ) : null}
 
       {/* Dark overlay for readability */}
-      <div className="absolute inset-0 bg-black/20" />
+      <div className="absolute inset-0 bg-black/20 pointer-events-none" />
 
       {/* Double-tap heart animation */}
       <AnimatePresence>

@@ -151,9 +151,7 @@ async function fetchLiveRooms(): Promise<{ rooms: ProcessedRoom[]; total: number
   }
 
   const payload = data.data as { records?: RoomRecord[]; total?: number };
-  const records = (payload?.records ?? []).filter(
-    (r) => !r.gameName || r.gameName.trim() === ""
-  );
+  const records = payload?.records ?? [];
   const rooms = records.map(mapRoom);
   const total = payload?.total ?? rooms.length;
 
