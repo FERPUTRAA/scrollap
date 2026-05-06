@@ -6,6 +6,9 @@ import LivePlayer from "./LivePlayer";
 interface Video {
   id: string;
   anchorId?: string;
+  liveId?: string;
+  zegoStreamId?: string;
+  hasAuth?: boolean;
   username: string;
   handle: string;
   caption: string;
@@ -54,9 +57,11 @@ export default function VideoCard({ video }: VideoCardProps) {
         <LivePlayer
           roomId={video.id}
           anchorId={video.anchorId}
+          liveId={video.liveId}
+          zegoStreamId={video.zegoStreamId}
           streamUrl={video.streamUrl}
-          streamProxyUrl={video.streamProxyUrl}
           cover={video.coverUrl}
+          hasAuth={video.hasAuth}
           className="absolute inset-0"
         />
       ) : video.coverUrl ? (

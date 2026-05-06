@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { fetch as undiciFetch } from "undici";
+import crypto from "crypto";
 
 const execFileAsync = promisify(execFile);
 
@@ -9,9 +10,13 @@ const liveRouter = Router();
 
 const MERCHANT_ID = process.env.HOT51_MERCHANT_ID ?? "501";
 const HOT51_BASE = process.env.HOT51_API_BASE ?? "https://api.fsccdn.com";
-const STREAM_BASE = process.env.HOT51_STREAM_BASE ?? "https://bcdn5.livcdn.com/live";
 const STREAM_KEY = process.env.HOT51_STREAM_KEY ?? "4ad75f5e2eb06d315ea14e8484a29e1d";
 const PROXY_URL = process.env.HOT51_PROXY_URL ?? "";
+
+const ZEGO_APP_ID = 975_360_885;
+const ZEGO_APP_SIGN = "968077d0acc44519d02de6d9c5ed7b0885479810224e9b3ac1c59d20dc25b009";
+
+const CDN_NODES = ["bcdn1", "bcdn2", "bcdn3", "bcdn4", "bcdn5", "bcdn6"];
 
 const APP_HEADERS: Record<string, string> = {
   merchantId: MERCHANT_ID,
@@ -57,8 +62,22 @@ function getUserHeaders(): Record<string, string> {
   };
 }
 
+function buildCDNUrls(roomId: string, anchorId?: string): string[] {
+  const urls: string[] = [];
+  const key = STREAM_KEY;
+  for (const node of CDN_NODES) {
+    urls.push(`https://${node}.livcdn.com/live/${MERCHANT_ID}_${roomId}_${key}.flv`);
+  }
+  if (anchorId && anchorId !== roomId) {
+    for (const node of CDN_NODES) {
+      urls.push(`https://${node}.livcdn.com/live/${MERCHANT_ID}_${anchorId}_${key}.flv`);
+    }
+  }
+  return urls;
+}
+
 function buildStreamUrl(roomId: string): string {
-  return `${STREAM_BASE}/${MERCHANT_ID}_${roomId}_${STREAM_KEY}.flv`;
+  return `https://bcdn5.livcdn.com/live/${MERCHANT_ID}_${roomId}_${STREAM_KEY}.flv`;
 }
 
 function proxyFlag(): string[] {
@@ -90,7 +109,7 @@ async function curlPost(
   return stdout;
 }
 
-/** Direct fetch to Hot51 API — never uses proxy (api.fsccdn.com is not geo-blocked) */
+/** Direct fetch to Hot51 API — never uses proxy */
 async function hotFetch(
   url: string,
   options: { method: string; headers: Record<string, string>; body?: string; timeoutMs?: number }
@@ -112,6 +131,7 @@ async function hotFetch(
 interface RoomRecord {
   id: string;
   anchorId?: string;
+  liveId?: string;
   anchorNickname?: string;
   onlineCount?: number;
   gameName?: string;
@@ -125,6 +145,7 @@ interface RoomRecord {
 interface ProcessedRoom {
   id: string;
   anchorId: string;
+  liveId: string;
   name: string;
   viewers: number;
   cover: string;
@@ -132,22 +153,64 @@ interface ProcessedRoom {
   liveName: string;
   streamUrl: string;
   streamProxyUrl: string;
+  zegoStreamId: string;
   hasAuth: boolean;
 }
 
 function mapRoom(r: RoomRecord): ProcessedRoom {
+  const anchorId = r.anchorId ?? r.id;
+  const liveId = r.liveId ?? r.id;
   return {
     id: r.id,
-    anchorId: r.anchorId ?? "",
+    anchorId,
+    liveId,
     name: r.anchorNickname ?? "Unknown",
     viewers: r.onlineCount ?? 0,
     cover: r.coverUrl ?? "",
     avatar: r.anchorAvatarUrl ?? r.coverUrl ?? "",
     liveName: r.liveName ?? "",
     streamUrl: buildStreamUrl(r.id),
-    streamProxyUrl: `/api/stream-proxy?roomId=${r.id}`,
+    streamProxyUrl: `/api/stream-proxy?roomId=${r.id}&anchorId=${anchorId}&liveId=${liveId}`,
+    zegoStreamId: `${MERCHANT_ID}_${anchorId}`,
     hasAuth: !!session,
   };
+}
+
+function extractRooms(data: unknown, depth = 0): { records: RoomRecord[]; total: number } {
+  if (!data || typeof data !== "object" || depth > 5) return { records: [], total: 0 };
+  if (Array.isArray(data)) {
+    return { records: data as RoomRecord[], total: data.length };
+  }
+  const d = data as Record<string, unknown>;
+
+  if (Array.isArray(d.records)) {
+    return { records: d.records as RoomRecord[], total: Number(d.total ?? d.records.length) };
+  }
+  if (Array.isArray(d.list)) {
+    return { records: d.list as RoomRecord[], total: Number(d.total ?? d.list.length) };
+  }
+  if (d.data !== undefined) {
+    const nested = extractRooms(d.data, depth + 1);
+    if (nested.records.length > 0) return nested;
+  }
+  if (d.result !== undefined) {
+    const nested = extractRooms(d.result, depth + 1);
+    if (nested.records.length > 0) return nested;
+  }
+  return { records: [], total: 0 };
+}
+
+function isApiOk(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  if (d.code === 200) return true;
+  if (d.errorCode && d.errorCode !== "200") return false;
+  if (d.data && typeof d.data === "object") {
+    const nested = d.data as Record<string, unknown>;
+    if (nested.errorCode) return false;
+  }
+  if (d.code === undefined && d.errorCode === undefined) return true;
+  return false;
 }
 
 let cache: { ts: number; rooms: ProcessedRoom[]; total: number } | null = null;
@@ -157,75 +220,96 @@ async function fetchLiveRooms(): Promise<{ rooms: ProcessedRoom[]; total: number
   const now = Date.now();
   if (cache && now - cache.ts < CACHE_TTL) return cache;
 
-  const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/v4/public/live/lrl`;
+  const lrlUrl = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/v4/public/live/lrl`;
+  const lrlBody = JSON.stringify({ area: "ID", page: 1, pageSize: 200 });
 
-  const data = await hotFetch(url, {
-    method: "GET",
-    headers: { ...APP_HEADERS, area: "ID" },
-    timeoutMs: 20_000,
-  }) as {
-    records?: RoomRecord[];
-    total?: number;
-    size?: number;
-  };
+  let data: unknown;
+  try {
+    data = await hotFetch(lrlUrl, {
+      method: "POST",
+      headers: APP_HEADERS,
+      body: lrlBody,
+      timeoutMs: 20_000,
+    });
+  } catch {
+    data = null;
+  }
 
-  const records = data?.records ?? [];
+  let { records, total } = extractRooms(data);
 
   if (records.length === 0) {
     const fallbackUrl = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/v3/public/live/room-index`;
     const fallbackBody = JSON.stringify({ area: "ID", gameType: 0, offset: 0, limit: 200, sortBy: "onlineCount", sortOrder: "desc" });
-    const fallbackData = await hotFetch(fallbackUrl, {
-      method: "POST",
-      headers: APP_HEADERS,
-      body: fallbackBody,
-      timeoutMs: 20_000,
-    }) as { code?: number; data?: { records?: RoomRecord[]; total?: number } };
-
-    if (fallbackData.code !== 200) {
-      const errData = fallbackData.data as Record<string, unknown> | undefined;
-      throw new Error(`Hot51 error: ${errData?.localizedValue ?? fallbackData.code}`);
+    try {
+      const fbData = await hotFetch(fallbackUrl, {
+        method: "POST",
+        headers: APP_HEADERS,
+        body: fallbackBody,
+        timeoutMs: 20_000,
+      });
+      const extracted = extractRooms(fbData);
+      records = extracted.records;
+      total = extracted.total;
+    } catch {
+      // fallback also failed
     }
-    const fbRooms = (fallbackData.data?.records ?? []).map(mapRoom);
-    cache = { ts: now, rooms: fbRooms, total: fallbackData.data?.total ?? fbRooms.length };
-    return cache;
+  }
+
+  if (records.length === 0) {
+    throw new Error("Tidak ada live room aktif. Server Hot51 mungkin sedang offline.");
   }
 
   const rooms = records.map(mapRoom);
-  const total = data.total ?? rooms.length;
-  cache = { ts: now, rooms, total };
+  cache = { ts: now, rooms, total: total || rooms.length };
   return cache;
 }
 
-async function getRealStreamUrl(roomId: string, anchorId: string): Promise<string | null> {
+async function getRealStreamUrl(roomId: string, anchorId: string, liveId?: string): Promise<string | null> {
   if (!session) return null;
 
-  try {
-    const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/zbliv/v3/public/live/room-info`;
-    const data = await hotFetch(url, {
-      method: "POST",
-      headers: { ...getUserHeaders() },
-      body: JSON.stringify({ anchorId, liveId: roomId }),
-      timeoutMs: 10_000,
-    }) as Record<string, unknown>;
+  const STREAM_FIELDS = ["pullAddr", "pullAddress", "pullUrl", "pullFlvUrl", "flvUrl", "playUrl", "streamUrl", "flvStreamUrl", "liveUrl"];
 
-    if (data.errorCode) return null;
-
-    const STREAM_FIELDS = ["pullAddr", "pullAddress", "pullUrl", "pullFlvUrl", "flvUrl", "playUrl", "streamUrl", "rtmpUrl"];
-    let foundStream: string | null = null;
-    const scan = (obj: unknown, depth = 0): void => {
-      if (!obj || typeof obj !== "object" || depth > 6) return;
-      for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-        if (STREAM_FIELDS.some(f => k.toLowerCase().includes(f.toLowerCase())) && typeof v === "string" && v.startsWith("http")) {
-          foundStream = v;
-        }
-        if (v && typeof v === "object") scan(v, depth + 1);
+  const scan = (obj: unknown, depth = 0): string | null => {
+    if (!obj || typeof obj !== "object" || depth > 8) return null;
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (STREAM_FIELDS.some(f => k.toLowerCase().includes(f.toLowerCase())) && typeof v === "string" && (v.startsWith("http") || v.startsWith("rtmp"))) {
+        if (v.includes(".flv") || v.includes("live")) return v;
       }
-    };
-    scan(data);
-    return foundStream;
-  } catch {
+      if (v && typeof v === "object") {
+        const found = scan(v, depth + 1);
+        if (found) return found;
+      }
+    }
     return null;
+  };
+
+  const endpoints = [
+    {
+      url: `${HOT51_BASE}/${MERCHANT_ID}/api/plr/live/room-info`,
+      body: JSON.stringify({ roomId }),
+    },
+    {
+      url: `${HOT51_BASE}/${MERCHANT_ID}/api/plr/zbliv/v3/public/live/room-info`,
+      body: JSON.stringify({ anchorId, liveId: liveId ?? roomId }),
+    },
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const data = await hotFetch(ep.url, {
+        method: "POST",
+        headers: getUserHeaders(),
+        body: ep.body,
+        timeoutMs: 10_000,
+      }) as Record<string, unknown>;
+      if (data.errorCode) continue;
+      const found = scan(data);
+      if (found) return found;
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 
 /** GET /api/live-rooms */
@@ -247,13 +331,14 @@ liveRouter.get("/live-rooms", async (req: Request, res: Response) => {
   }
 });
 
-/** GET /api/room-info?roomId=xxx&anchorId=xxx */
+/** GET /api/room-info?roomId=xxx&anchorId=xxx&liveId=xxx */
 liveRouter.get("/room-info", async (req: Request, res: Response) => {
   const roomId = String(req.query.roomId ?? "");
   const anchorId = String(req.query.anchorId ?? "");
+  const liveId = String(req.query.liveId ?? "");
   if (!roomId) { res.status(400).json({ success: false, error: "Missing ?roomId" }); return; }
 
-  const realUrl = await getRealStreamUrl(roomId, anchorId);
+  const realUrl = await getRealStreamUrl(roomId, anchorId, liveId);
 
   res.json({
     success: true,
@@ -262,6 +347,57 @@ liveRouter.get("/room-info", async (req: Request, res: Response) => {
     hasAuth: !!session,
     fromApi: !!realUrl,
   });
+});
+
+/** GET /api/zego-config */
+liveRouter.get("/zego-config", (_req: Request, res: Response) => {
+  res.json({
+    appId: ZEGO_APP_ID,
+    appSign: ZEGO_APP_SIGN,
+    merchantId: MERCHANT_ID,
+  });
+});
+
+/** Generate Zego Token v04 (server-side) */
+function generateZegoToken(appId: number, userId: string, appSign: string, expireSeconds = 3600): string {
+  const expire = Math.floor(Date.now() / 1000) + expireSeconds;
+  const nonce = crypto.randomBytes(8).toString("hex"); // 16 hex chars
+
+  const content = JSON.stringify({
+    app_id: appId,
+    user_id: userId,
+    nonce,
+    ctime: Math.floor(Date.now() / 1000),
+    expire,
+  });
+
+  // AES-128-CBC key/iv derived from SHA-256 of appSign bytes
+  const signBytes = Buffer.from(appSign, "hex");
+  const sha = crypto.createHash("sha256").update(signBytes).digest();
+  const key = sha.slice(0, 16);
+  const iv = sha.slice(16, 32);
+
+  const cipher = crypto.createCipheriv("aes-128-cbc", key, iv);
+  const enc = Buffer.concat([cipher.update(Buffer.from(content, "utf8")), cipher.final()]);
+
+  const nonceBuf = Buffer.from(nonce, "utf8");
+  const expireBuf = Buffer.allocUnsafe(8);
+  expireBuf.writeBigInt64BE(BigInt(expire), 0);
+  const nonceLenBuf = Buffer.allocUnsafe(2);
+  nonceLenBuf.writeUInt16BE(nonceBuf.length, 0);
+  const encLenBuf = Buffer.allocUnsafe(2);
+  encLenBuf.writeUInt16BE(enc.length, 0);
+
+  const packed = Buffer.concat([expireBuf, nonceLenBuf, nonceBuf, encLenBuf, enc]);
+  return "04" + packed.toString("base64");
+}
+
+/** GET /api/zego-token?userId=xxx */
+liveRouter.get("/zego-token", (req: Request, res: Response) => {
+  const userId = String(req.query.userId ?? `viewer_${crypto.randomBytes(4).toString("hex")}`);
+  const expire = Math.floor(Date.now() / 1000) + 3600;
+  const token = generateZegoToken(ZEGO_APP_ID, userId, ZEGO_APP_SIGN, 3600);
+  res.json({ token, userId, expire, appId: ZEGO_APP_ID });
 });
 
 /** Normalize phone: strip leading 0, ensure country code prefix */
@@ -273,7 +409,7 @@ function normalizePhone(phone: string, countryCode = "62"): string {
   return p;
 }
 
-/** POST /api/send-otp - send OTP to phone */
+/** POST /api/send-otp */
 liveRouter.post("/send-otp", async (req: Request, res: Response) => {
   const { phone, phoneRegion = "ID", phoneRegionCode = "+62" } = req.body as {
     phone?: string;
@@ -286,12 +422,12 @@ liveRouter.post("/send-otp", async (req: Request, res: Response) => {
   const normalizedPhone = normalizePhone(phone, phoneRegionCode);
   const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/grcen/verify-code/v1/centralized/phone`;
 
-  // Try multiple body formats — Hot51 API has changed across versions
   const attempts = [
+    { phone: normalizedPhone, phoneRegion: "62", loginType: 1 },
     { phone: normalizedPhone, phoneRegion, phoneRegionCode, loginType: 1 },
-    { phone: normalizedPhone, phoneRegion, phoneRegionCode, type: "login" },
     { phone: normalizedPhone, phoneRegion, loginType: 1 },
     { phone: normalizedPhone, loginType: 1 },
+    { phoneNum: normalizedPhone, phoneRegion: "62", loginType: 1 },
   ];
 
   let lastData: Record<string, unknown> = {};
@@ -306,7 +442,7 @@ liveRouter.post("/send-otp", async (req: Request, res: Response) => {
 
       req.log.info({ bodyObj, response: data }, "send-otp attempt");
 
-      const isOk = !data.errorCode || data.errorCode === "200" || data.code === 200;
+      const isOk = isApiOk(data);
       if (isOk) {
         res.json({ success: true, message: "Kode OTP dikirim. Cek SMS Anda.", phone: normalizedPhone });
         return;
@@ -321,7 +457,7 @@ liveRouter.post("/send-otp", async (req: Request, res: Response) => {
   res.json({ success: false, error: errMsg, raw: lastData, phone: normalizedPhone });
 });
 
-/** POST /api/verify-otp - verify OTP and store session */
+/** POST /api/verify-otp */
 liveRouter.post("/verify-otp", async (req: Request, res: Response) => {
   const { phone, verifyCode, phoneRegion = "ID", phoneRegionCode = "+62" } = req.body as {
     phone?: string;
@@ -339,9 +475,12 @@ liveRouter.post("/verify-otp", async (req: Request, res: Response) => {
   const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/grcen/verify-code/verify/phone`;
 
   const attempts = [
+    { phone: normalizedPhone, phoneRegion: "62", verifyCode, loginType: 1 },
+    { phone: normalizedPhone, phoneRegion, verifyCode, loginType: 1 },
     { phone: normalizedPhone, phoneRegion, phoneRegionCode, verifyCode, loginType: 1 },
-    { phone: normalizedPhone, phoneRegion, phoneRegionCode, verifyCode },
     { phone: normalizedPhone, verifyCode, loginType: 1 },
+    { phoneNum: normalizedPhone, phoneRegion: "62", verifyCode, loginType: 1 },
+    { mobile: normalizedPhone, phoneRegion: "62", verifyCode, loginType: 1 },
   ];
 
   let lastData: Record<string, unknown> = {};
@@ -354,32 +493,32 @@ liveRouter.post("/verify-otp", async (req: Request, res: Response) => {
         timeoutMs: 15_000,
       }) as Record<string, unknown>;
 
-      req.log.info({ bodyObj, response: data }, "verify-otp attempt");
+      req.log.info({ bodyObj, data }, "verify-otp attempt");
 
-      const isOk = !data.errorCode || data.errorCode === "200" || data.code === 200;
+      const isOk = isApiOk(data);
       if (!isOk) { lastData = data; continue; }
 
-      // Extract session credentials — scan full response tree
       let ac = "", sign = "", username = "";
-      const AC_KEYS = ["ac", "userId", "id", "memberId", "playerId"];
-      const SIGN_KEYS = ["sign", "token", "sessionToken", "accessToken", "authorization"];
-      const NAME_KEYS = ["username", "nickname", "nickName", "name", "account", "phone"];
 
-      const scan = (obj: unknown): void => {
+      const AC_KEYS = ["ac", "userId", "id", "memberId", "playerId", "uid"];
+      const SIGN_KEYS = ["sign", "token", "sessionToken", "accessToken", "authorization", "authToken"];
+      const NAME_KEYS = ["username", "nickname", "nickName", "name", "account"];
+
+      const scanForSession = (obj: unknown): void => {
         if (!obj || typeof obj !== "object") return;
         for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-          if (!ac && AC_KEYS.includes(k) && v) ac = String(v);
-          if (!sign && SIGN_KEYS.includes(k) && v) sign = String(v);
-          if (!username && NAME_KEYS.includes(k) && v) username = String(v);
-          if (v && typeof v === "object") scan(v);
+          if (!ac && AC_KEYS.includes(k) && v && typeof v !== "object") ac = String(v);
+          if (!sign && SIGN_KEYS.includes(k) && v && typeof v !== "object" && String(v).length > 8) sign = String(v);
+          if (!username && NAME_KEYS.includes(k) && v && typeof v !== "object") username = String(v);
+          if (v && typeof v === "object") scanForSession(v);
         }
       };
-      scan(data);
+      scanForSession(data);
 
       if (!ac || !sign) {
         res.json({
           success: false,
-          error: "Respons API tidak mengandung sesi. Gunakan 'Set credentials manual'.",
+          error: "Respons API tidak mengandung sesi. Gunakan 'Set credentials manual' atau coba lagi.",
           raw: data,
         });
         return;
@@ -399,7 +538,7 @@ liveRouter.post("/verify-otp", async (req: Request, res: Response) => {
   res.json({ success: false, error: errMsg, raw: lastData });
 });
 
-/** POST /api/set-credentials - manually set ac/sign */
+/** POST /api/set-credentials */
 liveRouter.post("/set-credentials", (req: Request, res: Response) => {
   const { ac, sign, username = "" } = req.body as { ac?: string; sign?: string; username?: string };
   if (!ac || !sign) {
@@ -423,54 +562,69 @@ liveRouter.post("/logout", (_req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-/** GET /api/stream-proxy?roomId=xxx&anchorId=xxx */
+/** GET /api/stream-proxy?roomId=xxx&anchorId=xxx&liveId=xxx */
 liveRouter.get("/stream-proxy", async (req: Request, res: Response) => {
   const roomId = String(req.query.roomId ?? "");
   const anchorId = String(req.query.anchorId ?? "");
+  const liveId = String(req.query.liveId ?? "");
   if (!roomId) { res.status(400).json({ error: "Missing ?roomId" }); return; }
 
-  let streamUrl = buildStreamUrl(roomId);
+  let candidateUrls: string[] = [];
 
-  if (session && anchorId) {
-    const realUrl = await getRealStreamUrl(roomId, anchorId);
-    if (realUrl) streamUrl = realUrl;
+  if (session) {
+    const realUrl = await getRealStreamUrl(roomId, anchorId, liveId);
+    if (realUrl) candidateUrls.push(realUrl);
   }
 
-  req.log.info({ roomId, streamUrl }, "stream-proxy");
+  candidateUrls = candidateUrls.concat(buildCDNUrls(roomId, anchorId));
 
-  try {
-    const upstream = await undiciFetch(streamUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Mobile Safari/537.36",
-        Accept: "*/*",
-        "Accept-Encoding": "identity",
-        Referer: "https://hot51.com",
-        Origin: "https://hot51.com",
-      },
-      signal: AbortSignal.timeout(8_000),
-    });
+  const cdnHeaders = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Mobile Safari/537.36",
+    Accept: "*/*",
+    "Accept-Encoding": "identity",
+    Referer: "https://hot51.com",
+    Origin: "https://hot51.com",
+  };
 
-    if (!upstream.ok || !upstream.body) {
-      res.status(upstream.status || 502).json({ error: `CDN HTTP ${upstream.status}`, streamUrl });
+  req.log.info({ roomId, candidateUrls: candidateUrls.slice(0, 3) }, "stream-proxy start");
+
+  for (const streamUrl of candidateUrls) {
+    try {
+      const upstream = await undiciFetch(streamUrl, {
+        headers: cdnHeaders,
+        signal: AbortSignal.timeout(6_000),
+      });
+
+      if (!upstream.ok || !upstream.body) {
+        req.log.warn({ streamUrl, status: upstream.status }, "stream-proxy CDN 4xx/5xx");
+        continue;
+      }
+
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Content-Type", upstream.headers.get("content-type") ?? "video/x-flv");
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("X-Stream-Url", streamUrl);
+
+      const reader = upstream.body.getReader();
+      const pump = async (): Promise<void> => {
+        const { done, value } = await reader.read();
+        if (done) { res.end(); return; }
+        res.write(value);
+        return pump();
+      };
+      await pump();
       return;
+    } catch {
+      continue;
     }
+  }
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Type", upstream.headers.get("content-type") ?? "video/x-flv");
-    res.setHeader("Cache-Control", "no-store");
-
-    const reader = upstream.body.getReader();
-    const pump = async (): Promise<void> => {
-      const { done, value } = await reader.read();
-      if (done) { res.end(); return; }
-      res.write(value);
-      return pump();
-    };
-    await pump();
-  } catch (err: unknown) {
-    if (!res.headersSent) {
-      res.status(502).json({ error: err instanceof Error ? err.message : "Stream failed", streamUrl });
-    }
+  if (!res.headersSent) {
+    res.status(403).json({
+      error: "CDN geo-blocked (403) dari semua node. Login untuk mendapatkan URL stream asli.",
+      hasAuth: !!session,
+      triedUrls: candidateUrls.length,
+    });
   }
 });
 

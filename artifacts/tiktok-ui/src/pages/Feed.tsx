@@ -6,6 +6,8 @@ import LoginModal from "../components/LoginModal";
 interface LiveRoom {
   id: string;
   anchorId?: string;
+  liveId?: string;
+  zegoStreamId?: string;
   name: string;
   viewers: number;
   cover: string;
@@ -53,6 +55,9 @@ function mapRoomToVideo(room: LiveRoom, index: number) {
   return {
     id: room.id,
     anchorId: room.anchorId ?? "",
+    liveId: room.liveId ?? "",
+    zegoStreamId: room.zegoStreamId ?? "",
+    hasAuth: room.hasAuth,
     username: room.name,
     handle: room.name.toLowerCase().replace(/[^a-z0-9]/g, "_"),
     caption: room.liveName || `${room.name} sedang live!`,
