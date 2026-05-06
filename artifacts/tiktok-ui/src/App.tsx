@@ -11,6 +11,7 @@ import Discover from "./pages/Discover";
 import Create from "./pages/Create";
 import Inbox from "./pages/Inbox";
 import Profile from "./pages/Profile";
+import FaVidCall from "./pages/FaVidCall";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient();
@@ -34,6 +35,7 @@ function AppContent() {
             <Route path="/" component={Feed} />
             <Route path="/discover" component={Discover} />
             <Route path="/create" component={Create} />
+            <Route path="/favidcall" component={FaVidCall} />
             <Route path="/inbox" component={Inbox} />
             <Route path="/profile" component={Profile} />
             <Route component={NotFound} />
