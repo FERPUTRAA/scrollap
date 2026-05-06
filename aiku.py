@@ -1,87 +1,220 @@
+#!/usr/bin/env python3
 import subprocess
-import json
-import os
 import time
+import os
+import re
 
-# Konfigurasi
-API_KEY = "AIzaSyApqcL86EjNPUhSGkTW6w_O-Wd4BnxLz4Q"
-TARGET_COMMAND = "node index.js"  # Ganti dengan perintah aplikasi kamu
-MAX_RETRIES = 3  # Batas maksimal mencoba memperbaiki secara otomatis
+# ─────────────────────────────────────────
+#  KONFIGURASI — HARUS SAMA DENGAN index.js
+# ─────────────────────────────────────────
+TARGET_FILE   = "index.js"
+PORT          = 9000
+MODEL_BENAR   = "gemini-2.0-flash"
+API_KEY_BENAR = "AIzaSyBzjq17LsHBt9mTNJpCKTlE0OwcYsrqqH4"
+ENDPOINT      = "v1beta"
 
-def ask_gemini(error_message, attempt):
-    print(f"\n[AIKU] (Percobaan {attempt}/{MAX_RETRIES}) Menganalisis error dengan Gemini...")
-    
-    prompt = (
-        f"Saya menjalankan perintah '{TARGET_COMMAND}' dan muncul error berikut:\n\n"
-        f"{error_message}\n\n"
-        f"Berikan satu baris perintah bash murni untuk memperbaikinya. "
-        f"Jangan berikan penjelasan, markdown, atau basa-basi. Cukup satu baris perintah murni saja."
+VALIDASI = {
+    "api_key": {
+        "pattern": r'const GEMINI_API_KEY\s*=\s*"([^"]+)"',
+        "fix": lambda c: re.sub(
+            r'const GEMINI_API_KEY\s*=\s*"[^"]+"',
+            f'const GEMINI_API_KEY = "{API_KEY_BENAR}"', c),
+        "pesan": f"⚠️  API Key tidak sesuai → diperbaiki"
+    },
+    "model": {
+        "pattern": r'const MODEL\s*=\s*"([^"]+)"',
+        "fix": lambda c: re.sub(
+            r'const MODEL\s*=\s*"[^"]+"',
+            f'const MODEL = "{MODEL_BENAR}"', c),
+        "pesan": f"⚠️  Model tidak sesuai → diperbaiki ke {MODEL_BENAR}"
+    },
+    "endpoint": {
+        "pattern": r"googleapis\.com/(v1(?!beta))/models",
+        "fix": lambda c: re.sub(
+            r"googleapis\.com/v1/models",
+            "googleapis.com/v1beta/models", c),
+        "pesan": "⚠️  Endpoint v1 → diperbaiki ke v1beta"
+    }
+}
+
+# ─────────────────────────────────────────
+#  BACA / TULIS FILE
+# ─────────────────────────────────────────
+def baca_file(path):
+    if not os.path.exists(path):
+        print(f"❌ File tidak ditemukan: {path}")
+        return None
+    with open(path, "r") as f:
+        return f.read()
+
+def tulis_file(path, konten):
+    with open(path, "w") as f:
+        f.write(konten)
+
+# ─────────────────────────────────────────
+#  VALIDASI & PERBAIKAN OTOMATIS
+# ─────────────────────────────────────────
+def validasi_dan_perbaiki():
+    print(f"\n🔍 Membaca dan memvalidasi: {TARGET_FILE}")
+    print("─" * 48)
+
+    konten = baca_file(TARGET_FILE)
+    if konten is None:
+        return False
+
+    print(f"📄 Ukuran file : {len(konten)} karakter")
+    print(f"📝 Total baris : {konten.count(chr(10))} baris")
+    print("─" * 48)
+
+    ada_perbaikan = False
+
+    for nama, aturan in VALIDASI.items():
+        match = re.search(aturan["pattern"], konten)
+
+        if nama == "api_key" and match:
+            nilai = match.group(1)
+            if nilai != API_KEY_BENAR:
+                print(f"⚠️  API Key ditemukan  : {nilai[:10]}...{nilai[-4:]}")
+                print(f"   Seharusnya          : {API_KEY_BENAR[:10]}...{API_KEY_BENAR[-4:]}")
+                konten = aturan["fix"](konten)
+                ada_perbaikan = True
+                print(f"   ✅ API Key diperbaiki")
+            else:
+                print(f"✅ [api_key] cocok     : {nilai[:10]}...{nilai[-4:]}")
+
+        elif nama == "model" and match:
+            nilai = match.group(1)
+            if nilai != MODEL_BENAR:
+                print(f"⚠️  Model ditemukan    : {nilai}")
+                print(f"   Seharusnya          : {MODEL_BENAR}")
+                konten = aturan["fix"](konten)
+                ada_perbaikan = True
+                print(f"   ✅ Model diperbaiki")
+            else:
+                print(f"✅ [model] cocok       : {nilai}")
+
+        elif nama == "endpoint":
+            if match:
+                print(aturan["pesan"])
+                konten = aturan["fix"](konten)
+                ada_perbaikan = True
+                print(f"   ✅ Endpoint diperbaiki")
+            else:
+                ep = re.search(r"googleapis\.com/(v1\w*)/models", konten)
+                ep_val = ep.group(1) if ep else "tidak ditemukan"
+                print(f"✅ [endpoint] cocok    : {ep_val}")
+
+    if ada_perbaikan:
+        tulis_file(TARGET_FILE + ".bak", konten)
+        tulis_file(TARGET_FILE, konten)
+        print(f"\n💾 Perbaikan disimpan  → {TARGET_FILE}")
+        print(f"📦 Backup tersedia     → {TARGET_FILE}.bak")
+    else:
+        print(f"\n✅ Semua konfigurasi index.js sudah benar.")
+
+    return True
+
+# ─────────────────────────────────────────
+#  CEK DEPENDENSI
+# ─────────────────────────────────────────
+def cek_dependensi():
+    print("\n📦 Mengecek dependensi Node.js...")
+    hasil = subprocess.run(
+        ["node", "-e",
+         "['express','cors'].forEach(m=>{try{require(m);console.log('OK:'+m)}catch(e){console.log('MISSING:'+m)}})"],
+        capture_output=True, text=True)
+
+    missing = []
+    for baris in hasil.stdout.strip().split("\n"):
+        if baris.startswith("OK:"):
+            print(f"  ✅ {baris[3:]}")
+        elif baris.startswith("MISSING:"):
+            pkg = baris[8:]
+            print(f"  ❌ {pkg} belum terinstall")
+            missing.append(pkg)
+
+    if missing:
+        print(f"\n⚙️  Menginstall: {' '.join(missing)} ...")
+        subprocess.run(["npm", "install"] + missing, capture_output=True)
+        print("  ✅ Instalasi selesai")
+
+# ─────────────────────────────────────────
+#  KILL PORT
+# ─────────────────────────────────────────
+def kill_port():
+    hasil = subprocess.run(["fuser", f"{PORT}/tcp"], capture_output=True, text=True)
+    if hasil.stdout.strip():
+        print(f"\n🔫 Mematikan proses lama di port {PORT}...")
+        subprocess.run(["fuser", "-k", f"{PORT}/tcp"])
+        time.sleep(1)
+        print("  ✅ Port bersih")
+    else:
+        print(f"\n✅ Port {PORT} sudah kosong")
+
+# ─────────────────────────────────────────
+#  JALANKAN SERVER
+# ─────────────────────────────────────────
+def jalankan_server():
+    print(f"\n🚀 Menjalankan {TARGET_FILE}...")
+    print("─" * 48)
+
+    proc = subprocess.Popen(
+        ["node", TARGET_FILE],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
     )
-    
-    curl_cmd = [
-        "curl",
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}",
-        "-H", "Content-Type: application/json",
-        "-X", "POST",
-        "-d", json.dumps({
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
-        })
-    ]
-    
-    try:
-        result = subprocess.run(curl_cmd, capture_output=True, text=True)
-        response = json.loads(result.stdout)
-        suggestion = response['candidates'][0]['content']['parts'][0]['text']
-        return suggestion.strip()
-    except Exception as e:
-        return f"Error saat memanggil API: {e}"
 
-def run_and_validate():
-    attempt = 1
-    
-    while attempt <= MAX_RETRIES:
-        print(f"\n--- [AIKU] Menjalankan Aplikasi (Percobaan ke-{attempt}) ---")
-        
-        # Jalankan aplikasi utama dan pantau outputnya
-        process = subprocess.Popen(
-            TARGET_COMMAND,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+    time.sleep(3)
 
-        stdout, stderr = process.communicate()
+    if proc.poll() is None:
+        line = proc.stdout.readline()
+        if line:
+            print(f"📡 {line.strip()}")
+        print(f"\n✅ SERVER AKTIF di port {PORT}")
+        print("─" * 48)
+        print("📋 Log server (Ctrl+C untuk berhenti):\n")
+        try:
+            while True:
+                out = proc.stdout.readline()
+                err = proc.stderr.readline()
+                if out:
+                    print(f"  [OUT] {out.strip()}")
+                if err:
+                    print(f"  [ERR] {err.strip()}")
+                if proc.poll() is not None:
+                    print("\n⚠️  Server berhenti tidak terduga.")
+                    break
+        except KeyboardInterrupt:
+            print("\n\n🛑 Dihentikan oleh pengguna.")
+            proc.terminate()
+    else:
+        stderr = proc.stderr.read()
+        print("❌ GAGAL: Server langsung mati.")
+        print("─" * 48)
+        for baris in stderr.strip().split("\n"):
+            print(f"  {baris}")
+        print("\n💡 Saran: Jalankan 'fuser -k 9000/tcp' lalu coba lagi.")
 
-        # === PROSES VALIDASI ===
-        if process.returncode == 0:
-            print("\n[AIKU] [SUKSES] Aplikasi berjalan lancar tanpa error!")
-            print(f"[App Output]:\n{stdout}")
-            break  # Keluar dari loop karena aplikasi sukses divalidasi
-        else:
-            print(f"\n[AIKU] [ERROR TERDETEKSI] Aplikasi crash dengan pesan:\n{stderr}")
-            
-            if attempt == MAX_RETRIES:
-                print("\n[AIKU] [GAGAL] Sudah mencapai batas maksimal perbaikan otomatis. Silakan cek manual.")
-                break
-            
-            # Hubungi Gemini untuk mencari perbaikan
-            solusi = ask_gemini(stderr, attempt)
-            
-            # Bersihkan teks dari format markdown jika ada
-            clean_cmd = solusi.replace('```bash', '').replace('```', '').strip()
-            
-            print(f"[AIKU] Solusi yang disarankan: {clean_cmd}")
-            print("[AIKU] Mengeksekusi perbaikan otomatis...")
-            
-            # Eksekusi perintah perbaikan langsung di shell
-            os.system(clean_cmd)
-            
-            # Beri jeda 2 detik sebelum masuk ke iterasi berikutnya untuk memvalidasi ulang
-            time.sleep(2)
-            attempt += 1
+# ─────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────
+def run():
+    print("╔══════════════════════════════════════════════╗")
+    print("║         AIKU - AI Agent Validator v2         ║")
+    print("╠══════════════════════════════════════════════╣")
+    print(f"║  Model  : {MODEL_BENAR:<35}║")
+    print(f"║  Port   : {str(PORT):<35}║")
+    print(f"║  Target : {TARGET_FILE:<35}║")
+    print("╚══════════════════════════════════════════════╝")
+
+    ok = validasi_dan_perbaiki()
+    if not ok:
+        return
+
+    cek_dependensi()
+    kill_port()
+    jalankan_server()
 
 if __name__ == "__main__":
-    run_and_validate()
+    run()

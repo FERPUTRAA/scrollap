@@ -1,4 +1,4 @@
-modules = ["nodejs-24"]
+modules = ["nodejs-24", "python-3.11"]
 
 [deployment]
 router = "application"
@@ -32,6 +32,26 @@ localPort = 8082
 externalPort = 3000
 
 [[ports]]
+localPort = 8083
+externalPort = 3003
+
+[[ports]]
+localPort = 8084
+externalPort = 4200
+
+[[ports]]
+localPort = 8085
+externalPort = 3002
+
+[[ports]]
+localPort = 8086
+externalPort = 3001
+
+[[ports]]
+localPort = 9000
+externalPort = 9000
+
+[[ports]]
 localPort = 20677
 externalPort = 80
 
@@ -40,3 +60,6 @@ externalPort = 80
 [userenv.shared]
 HOT51_STREAM_KEY = "4ad75f5e2eb06d315ea14e8484a29e1d"
 HOT51_PROXY_URL = "socks5://103.76.149.140:1080"
+
+[nix]
+packages = ["psmisc"]
