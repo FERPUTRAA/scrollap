@@ -4,6 +4,7 @@ import mpegts from "mpegts.js";
 interface LivePlayerProps {
   streamUrl: string;
   streamProxyUrl?: string;
+  anchorId?: string;
   roomId: string;
   cover?: string;
   className?: string;
@@ -11,48 +12,41 @@ interface LivePlayerProps {
 
 type PlayerState = "idle" | "loading" | "playing" | "error";
 
-export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, className = "" }: LivePlayerProps) {
+function toAbsoluteUrl(url: string): string {
+  if (url.startsWith("http://") || url.startsWith("https://")) return url;
+  return `${window.location.origin}${url.startsWith("/") ? url : `/${url}`}`;
+}
+
+export default function LivePlayer({ streamUrl, streamProxyUrl, anchorId, roomId, cover, className = "" }: LivePlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<mpegts.Player | null>(null);
   const [state, setState] = useState<PlayerState>("idle");
   const [muted, setMuted] = useState(true);
   const [errorMsg, setErrorMsg] = useState("");
-  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
   const tryCountRef = useRef(0);
+  const urlQueueRef = useRef<string[]>([]);
 
   useEffect(() => {
-    resolveStreamUrl();
-    return () => destroyPlayer();
-  }, [roomId]);
+    tryCountRef.current = 0;
 
-  async function resolveStreamUrl() {
-    setState("loading");
-    setErrorMsg("");
-
-    try {
-      const baseUrl = import.meta.env.BASE_URL?.replace(/\/$/, "") || "";
-      const res = await fetch(`${baseUrl}/api/room-info?roomId=${encodeURIComponent(roomId)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.streamUrl) {
-          setResolvedUrl(data.streamUrl);
-          return;
-        }
-      }
-    } catch {
+    const queue: string[] = [];
+    if (streamUrl) queue.push(toAbsoluteUrl(streamUrl));
+    if (streamProxyUrl) {
+      const proxyWithAnchor = anchorId
+        ? `${streamProxyUrl}${streamProxyUrl.includes("?") ? "&" : "?"}anchorId=${anchorId}`
+        : streamProxyUrl;
+      queue.push(toAbsoluteUrl(proxyWithAnchor));
     }
+    urlQueueRef.current = queue;
 
-    setResolvedUrl(streamUrl);
-  }
-
-  useEffect(() => {
-    if (!resolvedUrl) return;
-    startPlayer(resolvedUrl);
-  }, [resolvedUrl]);
+    if (queue.length > 0) startPlayer(queue[0]);
+    return () => destroyPlayer();
+  }, [roomId, streamUrl]);
 
   function startPlayer(url: string) {
     destroyPlayer();
     if (!videoRef.current) return;
+
     if (!mpegts.getFeatureList().mseLivePlayback) {
       setState("error");
       setErrorMsg("Browser tidak mendukung MSE live playback");
@@ -60,6 +54,7 @@ export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, c
     }
 
     setState("loading");
+    setErrorMsg("");
 
     const player = mpegts.createPlayer(
       {
@@ -71,9 +66,8 @@ export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, c
       {
         enableWorker: true,
         lazyLoadMaxDuration: 3 * 60,
-        seekType: "range",
         liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 1.5,
+        liveBufferLatencyMaxLatency: 2.0,
         liveBufferLatencyMinRemain: 0.5,
         autoCleanupSourceBuffer: true,
         fixAudioTimestampGap: true,
@@ -86,26 +80,24 @@ export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, c
 
     player.on(mpegts.Events.ERROR, (_errType: unknown, _errDetail: unknown, errInfo: unknown) => {
       const info = errInfo as { msg?: string } | null;
-      const prevUrl = url;
-      tryCountRef.current += 1;
+      destroyPlayer();
 
-      if (tryCountRef.current === 1 && streamProxyUrl && prevUrl !== streamProxyUrl) {
-        destroyPlayer();
-        startPlayer(streamProxyUrl);
+      tryCountRef.current += 1;
+      const nextUrl = urlQueueRef.current[tryCountRef.current];
+      if (nextUrl) {
+        startPlayer(nextUrl);
         return;
       }
 
       setState("error");
-      setErrorMsg(info?.msg ?? "Stream tidak tersedia");
+      setErrorMsg(info?.msg ?? "Stream tidak dapat diputar");
     });
 
     player.on(mpegts.Events.MEDIA_INFO, () => {
       setState("playing");
     });
 
-    videoRef.current
-      .play()
-      .catch(() => {});
+    videoRef.current.play().catch(() => {});
   }
 
   function destroyPlayer() {
@@ -123,7 +115,8 @@ export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, c
 
   function handleRetry() {
     tryCountRef.current = 0;
-    resolveStreamUrl();
+    const url = urlQueueRef.current[0];
+    if (url) startPlayer(url);
   }
 
   return (
@@ -132,7 +125,7 @@ export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, c
         <img
           src={cover}
           alt="cover"
-          className="absolute inset-0 w-full h-full object-cover opacity-60"
+          className="absolute inset-0 w-full h-full object-cover opacity-70"
         />
       )}
 
@@ -145,7 +138,7 @@ export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, c
       />
 
       {state === "loading" && (
-        <div className="absolute inset-0 flex items-center justify-center z-10">
+        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div
             className="w-9 h-9 rounded-full border-2 border-t-transparent animate-spin"
             style={{ borderColor: "#EE1D52 transparent transparent transparent" }}
@@ -155,7 +148,7 @@ export default function LivePlayer({ streamUrl, streamProxyUrl, roomId, cover, c
 
       {state === "error" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center z-10 gap-2 px-6">
-          <p className="text-white/60 text-[11px] text-center leading-relaxed">{errorMsg || "Stream offline"}</p>
+          <p className="text-white/60 text-[11px] text-center leading-relaxed">{errorMsg}</p>
           <button
             onClick={handleRetry}
             className="mt-1 px-4 py-1.5 rounded-full text-white text-xs font-bold"

@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from "react";
-import { RefreshCw, Radio, WifiOff, AlertCircle } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { RefreshCw, Radio, WifiOff, AlertCircle, User } from "lucide-react";
 import VideoCard from "../components/VideoCard";
+import LoginModal from "../components/LoginModal";
 
 interface LiveRoom {
   id: string;
+  anchorId?: string;
   name: string;
   viewers: number;
   cover: string;
@@ -11,6 +13,7 @@ interface LiveRoom {
   liveName: string;
   streamUrl: string;
   streamProxyUrl: string;
+  hasAuth?: boolean;
 }
 
 interface ApiResponse {
@@ -20,6 +23,12 @@ interface ApiResponse {
   source?: string;
   error?: string;
   proxy?: string;
+  hasAuth?: boolean;
+}
+
+interface SessionStatus {
+  loggedIn: boolean;
+  username?: string | null;
 }
 
 function formatCount(n: number): string {
@@ -43,6 +52,7 @@ function mapRoomToVideo(room: LiveRoom, index: number) {
   const viewers = room.viewers;
   return {
     id: room.id,
+    anchorId: room.anchorId ?? "",
     username: room.name,
     handle: room.name.toLowerCase().replace(/[^a-z0-9]/g, "_"),
     caption: room.liveName || `${room.name} sedang live!`,
@@ -63,6 +73,8 @@ function mapRoomToVideo(room: LiveRoom, index: number) {
 type FeedTab = "ForYou" | "Following";
 type FeedStatus = "loading" | "ok" | "error";
 
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
 export default function Feed() {
   const [activeTab, setActiveTab] = useState<FeedTab>("ForYou");
   const [videos, setVideos] = useState<ReturnType<typeof mapRoomToVideo>[]>([]);
@@ -70,11 +82,23 @@ export default function Feed() {
   const [errorMsg, setErrorMsg] = useState("");
   const [proxyStatus, setProxyStatus] = useState<string>("");
   const [total, setTotal] = useState(0);
+  const [showLogin, setShowLogin] = useState(false);
+  const [session, setSession] = useState<SessionStatus>({ loggedIn: false });
 
-  const fetchRooms = async () => {
+  const checkSession = useCallback(async () => {
+    try {
+      const res = await fetch(`${BASE}/api/session-status`);
+      const data = await res.json() as SessionStatus;
+      setSession(data);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const fetchRooms = useCallback(async () => {
     setStatus("loading");
     try {
-      const res = await fetch("/api/live-rooms?limit=30");
+      const res = await fetch(`${BASE}/api/live-rooms?limit=30`);
       const data: ApiResponse = await res.json();
 
       if (data.success && data.rooms && data.rooms.length > 0) {
@@ -92,13 +116,19 @@ export default function Feed() {
       setErrorMsg(err instanceof Error ? err.message : "Gagal memuat data");
       setStatus("error");
     }
-  };
+  }, []);
 
   useEffect(() => {
+    checkSession();
     fetchRooms();
     const iv = setInterval(fetchRooms, 60_000);
     return () => clearInterval(iv);
-  }, []);
+  }, [fetchRooms, checkSession]);
+
+  const handleLoginSuccess = useCallback(() => {
+    checkSession();
+    fetchRooms();
+  }, [checkSession, fetchRooms]);
 
   return (
     <div className="relative h-full w-full bg-black">
@@ -108,7 +138,18 @@ export default function Feed() {
         className="absolute top-0 left-0 right-0 z-20 flex justify-between items-center px-4 pt-12 pb-4 pointer-events-none"
         style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.65) 0%, transparent 100%)" }}
       >
-        <div className="flex-1" />
+        <div className="flex-1 flex items-center pointer-events-auto">
+          <button
+            onClick={() => setShowLogin(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full"
+            style={{ background: session.loggedIn ? "rgba(238,29,82,0.25)" : "rgba(255,255,255,0.1)" }}
+          >
+            <User size={13} color={session.loggedIn ? "#EE1D52" : "white"} />
+            <span className="text-xs font-semibold" style={{ color: session.loggedIn ? "#EE1D52" : "white" }}>
+              {session.loggedIn ? (session.username ?? "Login") : "Login"}
+            </span>
+          </button>
+        </div>
 
         <div className="flex gap-5 items-center font-bold text-[15px] drop-shadow pointer-events-auto">
           <button
@@ -200,6 +241,15 @@ export default function Feed() {
           ))}
         </div>
       )}
+
+      {/* Login Modal */}
+      <LoginModal
+        open={showLogin}
+        onClose={() => setShowLogin(false)}
+        onLogin={handleLoginSuccess}
+        loggedIn={session.loggedIn}
+        username={session.username}
+      />
     </div>
   );
 }

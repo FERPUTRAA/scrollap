@@ -5,6 +5,7 @@ import LivePlayer from "./LivePlayer";
 
 interface Video {
   id: string;
+  anchorId?: string;
   username: string;
   handle: string;
   caption: string;
@@ -52,6 +53,7 @@ export default function VideoCard({ video }: VideoCardProps) {
       {video.isLive && video.streamUrl ? (
         <LivePlayer
           roomId={video.id}
+          anchorId={video.anchorId}
           streamUrl={video.streamUrl}
           streamProxyUrl={video.streamProxyUrl}
           cover={video.coverUrl}
