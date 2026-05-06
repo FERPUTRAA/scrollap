@@ -90,26 +90,22 @@ async function curlPost(
   return stdout;
 }
 
+/** Direct fetch to Hot51 API — never uses proxy (api.fsccdn.com is not geo-blocked) */
 async function hotFetch(
   url: string,
   options: { method: string; headers: Record<string, string>; body?: string; timeoutMs?: number }
 ): Promise<unknown> {
-  let text: string;
-  if (PROXY_URL && options.method === "POST") {
-    text = await curlPost(url, options.headers, options.body ?? "{}", options.timeoutMs);
-  } else {
-    const res = await undiciFetch(url, {
-      method: options.method,
-      headers: options.headers,
-      body: options.body,
-      signal: AbortSignal.timeout(options.timeoutMs ?? 12_000),
-    });
-    text = await res.text();
-  }
+  const res = await undiciFetch(url, {
+    method: options.method,
+    headers: options.headers,
+    body: options.body,
+    signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
+  });
+  const text = await res.text();
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error(`Bad JSON: ${text.slice(0, 400)}`);
+    throw new Error(`Bad JSON (HTTP ${res.status}): ${text.slice(0, 400)}`);
   }
 }
 
@@ -268,6 +264,15 @@ liveRouter.get("/room-info", async (req: Request, res: Response) => {
   });
 });
 
+/** Normalize phone: strip leading 0, ensure country code prefix */
+function normalizePhone(phone: string, countryCode = "62"): string {
+  const stripped = countryCode.replace(/^\+/, "");
+  let p = phone.trim().replace(/\s+/g, "").replace(/[^0-9]/g, "");
+  if (p.startsWith("0")) p = stripped + p.slice(1);
+  if (!p.startsWith(stripped)) p = stripped + p;
+  return p;
+}
+
 /** POST /api/send-otp - send OTP to phone */
 liveRouter.post("/send-otp", async (req: Request, res: Response) => {
   const { phone, phoneRegion = "ID", phoneRegionCode = "+62" } = req.body as {
@@ -278,42 +283,42 @@ liveRouter.post("/send-otp", async (req: Request, res: Response) => {
 
   if (!phone) { res.status(400).json({ success: false, error: "Phone required" }); return; }
 
-  try {
-    const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/grcen/verify-code/v1/centralized/phone`;
-    const body = JSON.stringify({
-      phone: phone.replace(/^0/, `${phoneRegionCode.replace("+", "")}`),
-      phoneRegion,
-      phoneRegionCode,
-      loginType: 1,
-    });
+  const normalizedPhone = normalizePhone(phone, phoneRegionCode);
+  const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/grcen/verify-code/v1/centralized/phone`;
 
-    const data = await hotFetch(url, {
-      method: "POST",
-      headers: APP_HEADERS,
-      body,
-      timeoutMs: 15_000,
-    }) as Record<string, unknown>;
+  // Try multiple body formats — Hot51 API has changed across versions
+  const attempts = [
+    { phone: normalizedPhone, phoneRegion, phoneRegionCode, loginType: 1 },
+    { phone: normalizedPhone, phoneRegion, phoneRegionCode, type: "login" },
+    { phone: normalizedPhone, phoneRegion, loginType: 1 },
+    { phone: normalizedPhone, loginType: 1 },
+  ];
 
-    if (data.errorCode || data.code === 401) {
-      const body2 = JSON.stringify({ phone, phoneRegion, phoneRegionCode, type: "login" });
-      const data2 = await hotFetch(url, {
+  let lastData: Record<string, unknown> = {};
+  for (const bodyObj of attempts) {
+    try {
+      const data = await hotFetch(url, {
         method: "POST",
         headers: APP_HEADERS,
-        body: body2,
+        body: JSON.stringify(bodyObj),
         timeoutMs: 15_000,
       }) as Record<string, unknown>;
-      if (data2.errorCode && data2.errorCode !== "200") {
-        res.json({ success: false, error: String(data2.localizedValue ?? data2.errorCode ?? "Failed to send OTP"), raw: data2 });
+
+      req.log.info({ bodyObj, response: data }, "send-otp attempt");
+
+      const isOk = !data.errorCode || data.errorCode === "200" || data.code === 200;
+      if (isOk) {
+        res.json({ success: true, message: "Kode OTP dikirim. Cek SMS Anda.", phone: normalizedPhone });
         return;
       }
-      res.json({ success: true, message: "OTP sent" });
-      return;
+      lastData = data;
+    } catch (err: unknown) {
+      lastData = { networkError: err instanceof Error ? err.message : "fetch failed" };
     }
-
-    res.json({ success: true, message: "OTP sent" });
-  } catch (err: unknown) {
-    res.status(502).json({ success: false, error: err instanceof Error ? err.message : "Failed" });
   }
+
+  const errMsg = String(lastData.localizedValue ?? lastData.errorCode ?? JSON.stringify(lastData));
+  res.json({ success: false, error: errMsg, raw: lastData, phone: normalizedPhone });
 });
 
 /** POST /api/verify-otp - verify OTP and store session */
@@ -326,41 +331,72 @@ liveRouter.post("/verify-otp", async (req: Request, res: Response) => {
   };
 
   if (!phone || !verifyCode) {
-    res.status(400).json({ success: false, error: "Phone and verifyCode required" });
+    res.status(400).json({ success: false, error: "Phone dan kode OTP wajib diisi" });
     return;
   }
 
-  try {
-    const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/grcen/verify-code/verify/phone`;
-    const data = await hotFetch(url, {
-      method: "POST",
-      headers: APP_HEADERS,
-      body: JSON.stringify({ phone, phoneRegion, phoneRegionCode, verifyCode, loginType: 1 }),
-      timeoutMs: 15_000,
-    }) as Record<string, unknown>;
+  const normalizedPhone = normalizePhone(phone, phoneRegionCode);
+  const url = `${HOT51_BASE}/${MERCHANT_ID}/api/plr/grcen/verify-code/verify/phone`;
 
-    if (data.errorCode && data.errorCode !== "200") {
-      res.json({ success: false, error: String(data.localizedValue ?? data.errorCode), raw: data });
+  const attempts = [
+    { phone: normalizedPhone, phoneRegion, phoneRegionCode, verifyCode, loginType: 1 },
+    { phone: normalizedPhone, phoneRegion, phoneRegionCode, verifyCode },
+    { phone: normalizedPhone, verifyCode, loginType: 1 },
+  ];
+
+  let lastData: Record<string, unknown> = {};
+  for (const bodyObj of attempts) {
+    try {
+      const data = await hotFetch(url, {
+        method: "POST",
+        headers: APP_HEADERS,
+        body: JSON.stringify(bodyObj),
+        timeoutMs: 15_000,
+      }) as Record<string, unknown>;
+
+      req.log.info({ bodyObj, response: data }, "verify-otp attempt");
+
+      const isOk = !data.errorCode || data.errorCode === "200" || data.code === 200;
+      if (!isOk) { lastData = data; continue; }
+
+      // Extract session credentials — scan full response tree
+      let ac = "", sign = "", username = "";
+      const AC_KEYS = ["ac", "userId", "id", "memberId", "playerId"];
+      const SIGN_KEYS = ["sign", "token", "sessionToken", "accessToken", "authorization"];
+      const NAME_KEYS = ["username", "nickname", "nickName", "name", "account", "phone"];
+
+      const scan = (obj: unknown): void => {
+        if (!obj || typeof obj !== "object") return;
+        for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+          if (!ac && AC_KEYS.includes(k) && v) ac = String(v);
+          if (!sign && SIGN_KEYS.includes(k) && v) sign = String(v);
+          if (!username && NAME_KEYS.includes(k) && v) username = String(v);
+          if (v && typeof v === "object") scan(v);
+        }
+      };
+      scan(data);
+
+      if (!ac || !sign) {
+        res.json({
+          success: false,
+          error: "Respons API tidak mengandung sesi. Gunakan 'Set credentials manual'.",
+          raw: data,
+        });
+        return;
+      }
+
+      session = { ac, sign, username: username || normalizedPhone, phone: normalizedPhone };
+      cache = null;
+      req.log.info({ ac, username: session.username }, "session saved");
+      res.json({ success: true, username: session.username, message: "Login berhasil!" });
       return;
+    } catch (err: unknown) {
+      lastData = { networkError: err instanceof Error ? err.message : "fetch failed" };
     }
-
-    const d = data.data as Record<string, unknown> | undefined ?? data;
-    const ac = String(d.ac ?? d.id ?? d.userId ?? "");
-    const sign = String(d.sign ?? d.token ?? d.sessionToken ?? "");
-    const username = String(d.username ?? d.nickname ?? d.phone ?? phone);
-
-    if (!ac || !sign) {
-      res.json({ success: false, error: "No session in response", raw: data });
-      return;
-    }
-
-    session = { ac, sign, username, phone };
-    cache = null;
-
-    res.json({ success: true, username, message: "Login berhasil" });
-  } catch (err: unknown) {
-    res.status(502).json({ success: false, error: err instanceof Error ? err.message : "Failed" });
   }
+
+  const errMsg = String(lastData.localizedValue ?? lastData.errorCode ?? JSON.stringify(lastData));
+  res.json({ success: false, error: errMsg, raw: lastData });
 });
 
 /** POST /api/set-credentials - manually set ac/sign */
