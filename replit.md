@@ -52,8 +52,8 @@ pnpm workspace monorepo. TikTok-clone UI dengan live feed dari Hot51 API (platfo
 
 - Hot51 API geo-blocks non-Indonesian IPs (error `IP_LIMIT` / code 402)
 - Proxy SOCKS4 bisa rate-limit/block server IP bila terlalu banyak koneksi berturut-turut — cache 2 menit untuk mengurangi hammering
-- Bila API/proxy gagal, server **selalu** serve demo data (8 room fiktif) — UI tidak pernah blank
-- UI menampilkan banner "Demo Mode — Proxy tidak aktif" bila `source:"demo"` dari API
+- Bila API/proxy gagal, server return HTTP 502 + `{success:false, error}` — tidak ada data palsu
+- UI tampilkan error state dengan pesan jelas bila API gagal
 - gameType=0 di request body memfilter live game — filter server-side hanya exclude `gameName` non-empty
 - Stream URL FLV pattern: `{STREAM_BASE}/501_{roomId}_{STREAM_KEY}.flv` (STREAM_KEY tetap, bukan txTime)
 - FLV stream butuh CORS proxy karena bcdn5.livcdn.com tidak kirim CORS header

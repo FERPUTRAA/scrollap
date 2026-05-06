@@ -19,7 +19,13 @@ interface ApiResponse {
   total?: number;
   source?: string;
   error?: string;
-  apiError?: string;
+  proxy?: string;
+}
+
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
 const GRADIENT_FALLBACKS = [
@@ -32,12 +38,6 @@ const GRADIENT_FALLBACKS = [
   "linear-gradient(160deg,#373b44,#4286f4)",
   "linear-gradient(160deg,#1a1a2e,#16213e,#0f3460)",
 ];
-
-function formatCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
-}
 
 function mapRoomToVideo(room: LiveRoom, index: number) {
   const viewers = room.viewers;
@@ -68,8 +68,8 @@ export default function Feed() {
   const [videos, setVideos] = useState<ReturnType<typeof mapRoomToVideo>[]>([]);
   const [status, setStatus] = useState<FeedStatus>("loading");
   const [errorMsg, setErrorMsg] = useState("");
+  const [proxyStatus, setProxyStatus] = useState<string>("");
   const [total, setTotal] = useState(0);
-  const [source, setSource] = useState<string>("api");
 
   const fetchRooms = async () => {
     setStatus("loading");
@@ -80,18 +80,16 @@ export default function Feed() {
       if (data.success && data.rooms && data.rooms.length > 0) {
         setVideos(data.rooms.map(mapRoomToVideo));
         setTotal(data.total ?? data.rooms.length);
-        setSource(data.source ?? "api");
         setStatus("ok");
         setErrorMsg("");
       } else if (!data.success) {
-        throw new Error(data.error ?? "Tidak ada room ditemukan");
+        setProxyStatus(data.proxy ?? "");
+        throw new Error(data.error ?? "Tidak ada data dari Hot51");
       } else {
-        setVideos([]);
-        setStatus("ok");
+        throw new Error("Tidak ada live room aktif saat ini");
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Gagal memuat data";
-      setErrorMsg(msg);
+      setErrorMsg(err instanceof Error ? err.message : "Gagal memuat data");
       setStatus("error");
     }
   };
@@ -101,8 +99,6 @@ export default function Feed() {
     const iv = setInterval(fetchRooms, 60_000);
     return () => clearInterval(iv);
   }, []);
-
-  const isDemo = source === "demo";
 
   return (
     <div className="relative h-full w-full bg-black">
@@ -133,10 +129,12 @@ export default function Feed() {
         </div>
 
         <div className="flex-1 flex items-center justify-end gap-2 pointer-events-auto">
-          {status === "ok" && !isDemo && (
+          {status === "ok" && (
             <span className="flex items-center gap-1">
               <Radio size={12} color="#69C9D0" />
-              <span className="text-[10px] text-[#69C9D0] font-bold">LIVE {total > 0 && `· ${formatCount(total)}`}</span>
+              <span className="text-[10px] text-[#69C9D0] font-bold">
+                LIVE {total > 0 && `· ${formatCount(total)}`}
+              </span>
             </span>
           )}
           <button onClick={fetchRooms} className="p-1">
@@ -148,19 +146,6 @@ export default function Feed() {
         </div>
       </div>
 
-      {/* Demo mode banner */}
-      {status === "ok" && isDemo && (
-        <div className="absolute top-0 left-0 right-0 z-30 flex justify-center" style={{ paddingTop: "48px" }}>
-          <div
-            className="flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-semibold text-white/80"
-            style={{ background: "rgba(238,29,82,0.35)", backdropFilter: "blur(6px)", border: "1px solid rgba(238,29,82,0.4)" }}
-          >
-            <WifiOff size={10} />
-            Demo Mode — Proxy tidak aktif
-          </div>
-        </div>
-      )}
-
       {/* Loading */}
       {status === "loading" && videos.length === 0 && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3">
@@ -168,7 +153,7 @@ export default function Feed() {
             className="w-10 h-10 rounded-full border-2 border-t-transparent animate-spin"
             style={{ borderColor: "#EE1D52 transparent transparent transparent" }}
           />
-          <p className="text-white/50 text-sm">Memuat live rooms...</p>
+          <p className="text-white/50 text-sm">Menghubungi Hot51...</p>
         </div>
       )}
 
@@ -178,13 +163,20 @@ export default function Feed() {
           <div className="flex items-center justify-center w-16 h-16 rounded-full bg-white/10">
             <WifiOff size={32} color="#EE1D52" />
           </div>
-          <p className="text-white text-base font-semibold text-center">Tidak bisa terhubung ke Hot51</p>
+          <p className="text-white text-base font-semibold text-center">
+            Gagal terhubung ke Hot51
+          </p>
           <div className="bg-white/10 rounded-xl px-4 py-3 w-full max-w-xs">
             <p className="text-white/60 text-xs text-center leading-relaxed flex items-start gap-1.5">
               <AlertCircle size={12} className="mt-0.5 shrink-0 text-yellow-400" />
               <span>{errorMsg}</span>
             </p>
           </div>
+          {proxyStatus === "not set" && (
+            <p className="text-white/40 text-[11px] text-center leading-relaxed max-w-xs">
+              Set <span className="text-yellow-400 font-mono">HOT51_PROXY_URL</span> ke proxy Indonesia yang aktif (socks4://IP:PORT)
+            </p>
+          )}
           <button
             onClick={fetchRooms}
             className="mt-2 px-6 py-2.5 rounded-full text-sm font-bold text-white"
@@ -195,7 +187,7 @@ export default function Feed() {
         </div>
       )}
 
-      {/* Video feed */}
+      {/* Video feed — real data only */}
       {status === "ok" && videos.length > 0 && (
         <div
           className="h-full w-full overflow-y-scroll snap-y snap-mandatory no-scrollbar"
