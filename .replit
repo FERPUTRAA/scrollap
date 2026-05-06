@@ -1,23 +1,7 @@
-modules = ["nodejs-24", "python-3.11"]
-
-[deployment]
-router = "application"
-deploymentTarget = "autoscale"
-
-[deployment.postBuild]
-args = ["pnpm", "store", "prune"]
-env = { "CI" = "true" }
-
-[workflows]
-runButton = "Project"
+run = "python3 aiku.py"
 
 [agent]
-stack = "PNPM_WORKSPACE"
 expertMode = true
-
-[postMerge]
-path = "scripts/post-merge.sh"
-timeoutMs = 20000
 
 [[ports]]
 localPort = 8080
@@ -25,21 +9,24 @@ externalPort = 8080
 
 [[ports]]
 localPort = 8081
-externalPort = 8081
+externalPort = 80
 
 [[ports]]
 localPort = 8082
+externalPort = 3003
+
+[[ports]]
+localPort = 8083
 externalPort = 3000
 
 [[ports]]
+localPort = 8084
+externalPort = 3001
+
+[[ports]]
+localPort = 8085
+externalPort = 4200
+
+[[ports]]
 localPort = 20677
-externalPort = 80
-
-[userenv]
-
-[userenv.shared]
-HOT51_STREAM_KEY = "4ad75f5e2eb06d315ea14e8484a29e1d"
-HOT51_PROXY_URL = "socks5://103.76.149.140:1080"
-
-[nix]
-packages = ["apache-jena"]
+externalPort = 3002
