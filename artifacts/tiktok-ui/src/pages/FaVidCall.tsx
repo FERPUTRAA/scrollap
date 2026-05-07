@@ -12,26 +12,21 @@ import AgoraRTC, {
   type IRemoteAudioTrack,
 } from "agora-rtc-sdk-ng";
 import {
-  Phone,
-  PhoneOff,
   Heart,
   Share2,
   UserPlus,
-  Mic,
   CheckCircle,
   Globe,
-  Signal,
   Volume2,
   VolumeX,
   Users,
   WifiOff,
-  Wifi,
   Radio,
-  Star,
   Zap,
-  X,
   ChevronUp,
   ChevronDown,
+  Eye,
+  Wifi,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -66,7 +61,6 @@ interface AgoraSession {
   token: string;
   uid: number;
   peerId: number | null;
-  orderNo?: string | null;
   source?: "ws" | "api";
 }
 
@@ -176,8 +170,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
       client.on("user-left", () => { if (!cancelled) setStreamState("no_stream"); });
 
       try {
-        // token can be null if App Certificate not enabled (test mode)
-        await client.join(AGORA_APP_ID, session.channel, session.token || null, session.uid);
+        await client.join(AGORA_APP_ID, session.channel, session.token || null, 0);
         if (cancelled) { await client.leave(); return; }
 
         const remoteUsers = client.remoteUsers;
@@ -205,10 +198,8 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
             setStreamState("no_stream");
           }
         }
-      } catch (err) {
-        if (!cancelled) {
-          setStreamState("error");
-        }
+      } catch {
+        if (!cancelled) setStreamState("error");
       }
     }
 
@@ -227,14 +218,12 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
   return { streamState, remoteVideo, muted, toggleMute, cleanup, autoplayBlocked, unblockAutoplay };
 }
 
-// ─── WS / SSE relay hook ────────────────────────────────────────────────────
+// ─── WS / SSE relay hook (passive - no calling) ─────────────────────────────
 function useVavaRelay(onSession: (s: AgoraSession) => void) {
   const [wsStatus, setWsStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
-  const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
     const es = new EventSource(`${BASE}/api/vava/ws-relay`);
-    esRef.current = es;
     setWsStatus("connecting");
 
     es.addEventListener("connected", () => setWsStatus("connecting"));
@@ -246,43 +235,31 @@ function useVavaRelay(onSession: (s: AgoraSession) => void) {
     es.addEventListener("agora_session", (e: MessageEvent) => {
       try {
         const d = JSON.parse(e.data) as {
-          appId: string; channel: string; token: string; uid: number; eventType?: string;
+          appId: string; channel: string; token: string; uid: number;
         };
         if (d.channel && d.token) {
-          onSession({
-            channel: d.channel,
-            token: d.token,
-            uid: d.uid,
-            peerId: null,
-            source: "ws",
-          });
+          onSession({ channel: d.channel, token: d.token, uid: d.uid, peerId: null, source: "ws" });
         }
       } catch {}
     });
 
     es.onerror = () => setWsStatus("error");
-
-    return () => { es.close(); esRef.current = null; setWsStatus("idle"); };
+    return () => { es.close(); setWsStatus("idle"); };
   }, [onSession]);
 
   return wsStatus;
 }
 
-// ─── User card ──────────────────────────────────────────────────────────────
+// ─── Live card ───────────────────────────────────────────────────────────────
 interface CardProps {
   user: VavaUser;
   index: number;
   isActive: boolean;
   session: AgoraSession | null;
-  sessionLoading: boolean;
   wsStatus: "idle" | "connecting" | "connected" | "error";
-  onConnect: () => void;
-  onDisconnect: () => void;
 }
 
-const VidCallCard = memo(function VidCallCard({
-  user, index, isActive, session, sessionLoading, wsStatus, onConnect, onDisconnect,
-}: CardProps) {
+const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStatus }: CardProps) {
   const [liked, setLiked] = useState(false);
   const [showHeart, setShowHeart] = useState(false);
   const [imgError, setImgError] = useState(false);
@@ -306,7 +283,7 @@ const VidCallCard = memo(function VidCallCard({
   const avatarFallback = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName)}&background=EE1D52&color=fff&size=400&bold=true`;
   const mainImg = !imgError && user.profilePictureUrl ? user.profilePictureUrl : avatarFallback;
   const isStreaming = streamState === "connected";
-  const isConnecting = streamState === "connecting" || sessionLoading;
+  const isConnecting = streamState === "connecting";
 
   return (
     <div
@@ -319,7 +296,7 @@ const VidCallCard = memo(function VidCallCard({
         src={mainImg}
         alt={user.displayName}
         className="absolute inset-0 w-full h-full object-cover"
-        style={{ opacity: isStreaming ? 0.08 : 0.5, transition: "opacity 0.6s ease" }}
+        style={{ opacity: isStreaming ? 0.07 : 0.55, transition: "opacity 0.6s ease" }}
         onError={() => setImgError(true)}
       />
 
@@ -336,7 +313,7 @@ const VidCallCard = memo(function VidCallCard({
         style={{
           background: isStreaming
             ? "linear-gradient(to top, rgba(0,0,0,0.92) 0%, transparent 50%)"
-            : "rgba(0,0,0,0.30)",
+            : "rgba(0,0,0,0.28)",
           zIndex: 6,
           transition: "background 0.6s ease",
         }}
@@ -373,41 +350,34 @@ const VidCallCard = memo(function VidCallCard({
         <div className="flex items-center gap-2">
           {isStreaming ? (
             <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[11px] font-bold"
-              style={{ background: "rgba(238,29,82,0.9)", backdropFilter: "blur(6px)" }}>
+              style={{ background: "rgba(238,29,82,0.95)", backdropFilter: "blur(6px)" }}>
               <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
               LIVE
             </span>
+          ) : session ? (
+            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[11px] font-bold"
+              style={{ background: "rgba(250,204,21,0.25)", border: "1px solid rgba(250,204,21,0.5)", backdropFilter: "blur(6px)" }}>
+              <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
+              MENGHUBUNGKAN
+            </span>
           ) : (
             <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[11px] font-bold"
-              style={{ background: "rgba(238,29,82,0.8)", backdropFilter: "blur(6px)" }}>
+              style={{ background: "rgba(255,255,255,0.12)", backdropFilter: "blur(6px)" }}>
               <Radio size={10} />
-              VIDEO CALL
+              VAVA LIVE
             </span>
           )}
         </div>
 
         <div className="flex items-center gap-2">
-          {/* WS Status */}
-          {!session && (
-            <span className="flex items-center gap-1 text-white text-[10px] font-bold px-2 py-1 rounded-full"
-              style={{
-                background: wsStatus === "connected" ? "rgba(34,197,94,0.3)" : wsStatus === "error" ? "rgba(239,68,68,0.3)" : "rgba(250,204,21,0.25)",
-                border: `1px solid ${wsStatus === "connected" ? "rgba(34,197,94,0.5)" : wsStatus === "error" ? "rgba(239,68,68,0.4)" : "rgba(250,204,21,0.4)"}`,
-              }}>
-              <span className={`w-1.5 h-1.5 rounded-full ${wsStatus === "connected" ? "bg-green-400 animate-pulse" : wsStatus === "error" ? "bg-red-400" : "bg-yellow-400 animate-pulse"}`} />
-              {wsStatus === "connected" ? "WS AKTIF" : wsStatus === "error" ? "WS ERR" : "WS..."}
-            </span>
-          )}
-          {session && (
-            <span className="flex items-center gap-1 text-white text-[10px] font-bold px-2 py-1 rounded-full"
-              style={{
-                background: isStreaming ? "rgba(34,197,94,0.4)" : "rgba(250,204,21,0.35)",
-                border: `1px solid ${isStreaming ? "rgba(34,197,94,0.6)" : "rgba(250,204,21,0.5)"}`,
-              }}>
-              <Signal size={10} />
-              {isStreaming ? "STREAMING" : "CH: " + session.channel.slice(0, 8)}
-            </span>
-          )}
+          <span className="flex items-center gap-1 text-white text-[10px] font-bold px-2 py-1 rounded-full"
+            style={{
+              background: wsStatus === "connected" ? "rgba(34,197,94,0.25)" : "rgba(250,204,21,0.2)",
+              border: `1px solid ${wsStatus === "connected" ? "rgba(34,197,94,0.5)" : "rgba(250,204,21,0.4)"}`,
+            }}>
+            <span className={`w-1.5 h-1.5 rounded-full ${wsStatus === "connected" ? "bg-green-400 animate-pulse" : "bg-yellow-400 animate-pulse"}`} />
+            {wsStatus === "connected" ? "SIARAN AKTIF" : "MENCARI…"}
+          </span>
         </div>
       </div>
 
@@ -418,8 +388,7 @@ const VidCallCard = memo(function VidCallCard({
             style={{ zIndex: 25 }}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <div className="w-16 h-16 rounded-full border-4 border-white/20 border-t-white animate-spin" />
-            <p className="text-white/80 text-sm font-medium">Menghubungkan ke RTC...</p>
-            {session && <p className="text-white/50 text-xs font-mono">ch: {session.channel.slice(0, 16)}…</p>}
+            <p className="text-white/80 text-sm font-medium">Bergabung ke siaran live…</p>
           </motion.div>
         )}
       </AnimatePresence>
@@ -435,20 +404,20 @@ const VidCallCard = memo(function VidCallCard({
               <Volume2 size={28} color="white" />
             </div>
             <p className="text-white font-bold text-sm">Tap untuk Play</p>
-            <p className="text-white/60 text-xs text-center">Ketuk untuk mulai video</p>
+            <p className="text-white/60 text-xs text-center">Ketuk untuk mulai menonton</p>
           </div>
         </motion.div>
       )}
 
-      {/* No stream notice */}
+      {/* Waiting for live notice */}
       {streamState === "no_stream" && !isConnecting && isActive && (
         <div className="absolute left-4 right-4 flex items-center gap-2 px-3 py-2 rounded-xl"
           style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.55)",
             border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(8px)", zIndex: 20 }}>
           <Wifi size={14} color="rgba(255,255,255,0.6)" />
           <div>
-            <p className="text-white/80 text-xs font-semibold">Terhubung ke channel Agora</p>
-            <p className="text-white/50 text-[10px]">Menunggu host mulai streaming…</p>
+            <p className="text-white/80 text-xs font-semibold">Bergabung ke channel</p>
+            <p className="text-white/50 text-[10px]">Menunggu host mulai siaran…</p>
           </div>
         </div>
       )}
@@ -456,14 +425,14 @@ const VidCallCard = memo(function VidCallCard({
       {/* Error notice */}
       {streamState === "error" && !isConnecting && isActive && (
         <div className="absolute left-4 right-4 flex items-center gap-2 px-3 py-2 rounded-xl"
-          style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(238,29,82,0.15)",
-            border: "1px solid rgba(238,29,82,0.3)", backdropFilter: "blur(8px)", zIndex: 20 }}>
+          style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(238,29,82,0.12)",
+            border: "1px solid rgba(238,29,82,0.25)", backdropFilter: "blur(8px)", zIndex: 20 }}>
           <WifiOff size={14} color="#EE1D52" />
-          <p className="text-white/70 text-xs">Gagal join channel</p>
+          <p className="text-white/70 text-xs">Tidak dapat bergabung ke siaran ini</p>
         </div>
       )}
 
-      {/* Profile photo panel (when not streaming) */}
+      {/* Profile photo panel (offline state) */}
       {!isStreaming && !isConnecting && (
         <motion.div className="absolute rounded-3xl overflow-hidden"
           style={{ top: "13%", left: "7%", right: "21%", height: "46%",
@@ -478,7 +447,7 @@ const VidCallCard = memo(function VidCallCard({
             style={{ background: "linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 55%)" }} />
           <div className="absolute bottom-3 left-3 right-3 flex items-end justify-between">
             <div className="flex items-center gap-1.5">
-              <Mic size={11} color="white" />
+              <Eye size={11} color="white" />
               <span className="text-white text-xs font-semibold">{user.displayName}</span>
               {user.verified && <CheckCircle size={11} color="#69C9D0" fill="#69C9D0" />}
             </div>
@@ -487,7 +456,6 @@ const VidCallCard = memo(function VidCallCard({
                 onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
             )}
           </div>
-          {/* Online indicator */}
           <div className="absolute top-3 right-3">
             {user.online ? (
               <span className="relative flex h-3 w-3">
@@ -552,16 +520,6 @@ const VidCallCard = memo(function VidCallCard({
           <Share2 size={28} color="white" strokeWidth={1.5} />
           <span className="text-white text-xs font-semibold drop-shadow">Bagikan</span>
         </button>
-
-        <motion.button className="flex flex-col items-center gap-1" whileTap={{ scale: 0.92 }}
-          onClick={(e) => { e.stopPropagation(); session ? onDisconnect() : onConnect(); }}>
-          <div className="w-[46px] h-[46px] rounded-full flex items-center justify-center"
-            style={{ background: session ? "rgba(238,29,82,0.9)" : "#22c55e",
-              boxShadow: `0 0 18px ${session ? "#EE1D52" : "#22c55e"}66` }}>
-            {session ? <PhoneOff size={20} color="white" /> : <Phone size={20} color="white" fill="white" />}
-          </div>
-          <span className="text-white text-xs font-semibold drop-shadow">{session ? "Keluar" : "Stream"}</span>
-        </motion.button>
       </div>
 
       {/* Bottom info */}
@@ -580,10 +538,8 @@ const VidCallCard = memo(function VidCallCard({
             </span>
           )}
           {user.distance && <span className="text-white/60 text-xs">{user.distance}</span>}
-          {user.busy && <span className="text-yellow-400 text-xs font-semibold">Sedang sibuk</span>}
         </div>
 
-        {/* Hobby tags */}
         {user.hobbies.length > 0 && (
           <div className="flex flex-wrap gap-1 mb-1">
             {user.hobbies.slice(0, 3).map((h) => (
@@ -599,14 +555,14 @@ const VidCallCard = memo(function VidCallCard({
           <Users size={11} color="rgba(255,255,255,0.7)" />
           <p className="text-white/70 text-xs drop-shadow">
             {isStreaming
-              ? "🔴 Streaming live sekarang"
+              ? "🔴 Sedang live sekarang"
               : session
-              ? "📡 Terhubung ke channel RTC"
+              ? "📡 Bergabung ke channel siaran"
               : user.withVideoPass
-              ? "🎫 Tersedia video pass"
+              ? "🎬 Tersedia di video pass"
               : user.busy
-              ? "Sedang dalam panggilan"
-              : "Siap dihubungi"}
+              ? "📹 Sedang siaran"
+              : "⏳ Menunggu siaran dimulai"}
           </p>
         </div>
       </div>
@@ -614,103 +570,20 @@ const VidCallCard = memo(function VidCallCard({
   );
 });
 
-// ─── Searching overlay ───────────────────────────────────────────────────────
-function SearchingOverlay({
-  user, onCancel,
-}: { user: VavaUser; onCancel: () => void }) {
-  const [phase, setPhase] = useState(0);
-  const [imgError, setImgError] = useState(false);
-  const phases = ["Mencari kecocokan…", "Menganalisis profil…", "Menghubungkan…", "Menunggu respons…"];
-
-  useEffect(() => {
-    const t = setInterval(() => setPhase((p) => (p + 1) % phases.length), 2000);
-    return () => clearInterval(t);
-  }, []);
-
-  const mainImg = !imgError && user.profilePictureUrl ? user.profilePictureUrl
-    : `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName)}&background=EE1D52&color=fff&size=300`;
-
-  return (
-    <motion.div
-      className="absolute inset-0 flex flex-col items-center justify-center gap-4"
-      style={{ zIndex: 50, background: "rgba(0,0,0,0.72)", backdropFilter: "blur(8px)" }}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-    >
-      {/* Close button */}
-      <button className="absolute top-12 right-4 w-8 h-8 rounded-full flex items-center justify-center"
-        style={{ background: "rgba(255,255,255,0.15)" }} onClick={onCancel}>
-        <X size={16} color="white" />
-      </button>
-
-      {/* Ripple + photo */}
-      <div className="relative flex items-center justify-center">
-        {[1, 2, 3].map((i) => (
-          <motion.div key={i}
-            className="absolute rounded-full border-2 border-white/30"
-            style={{ width: 80 + i * 40, height: 80 + i * 40 }}
-            animate={{ scale: [1, 1.1, 1], opacity: [0.4, 0.15, 0.4] }}
-            transition={{ duration: 2, repeat: Infinity, delay: i * 0.4 }} />
-        ))}
-        <div className="w-20 h-20 rounded-full overflow-hidden border-3 border-white/60 z-10"
-          style={{ border: "3px solid rgba(255,255,255,0.6)" }}>
-          <img src={mainImg} alt={user.displayName} className="w-full h-full object-cover"
-            onError={() => setImgError(true)} />
-        </div>
-      </div>
-
-      <div className="text-center">
-        <p className="text-white font-bold text-base mb-1">{user.displayName}</p>
-        <p className="text-white/60 text-xs">{user.country} · {user.age ? `${user.age} thn` : ""}</p>
-      </div>
-
-      <motion.p
-        key={phase}
-        className="text-white/80 text-sm font-medium text-center"
-        initial={{ opacity: 0, y: 5 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: -5 }}
-        transition={{ duration: 0.3 }}
-      >
-        {phases[phase]}
-      </motion.p>
-
-      <div className="flex gap-1.5">
-        {phases.map((_, i) => (
-          <div key={i} className="w-1.5 h-1.5 rounded-full"
-            style={{ background: i === phase ? "white" : "rgba(255,255,255,0.3)" }} />
-        ))}
-      </div>
-
-      <button className="mt-2 flex items-center gap-2 px-5 py-2.5 rounded-full"
-        style={{ background: "rgba(238,29,82,0.9)" }} onClick={onCancel}>
-        <PhoneOff size={16} color="white" />
-        <span className="text-white text-sm font-bold">Batalkan</span>
-      </button>
-    </motion.div>
-  );
-}
-
 // ─── Page ───────────────────────────────────────────────────────────────────
 type PageStatus = "loading" | "ok" | "error";
 
 export default function FaVidCall() {
-  const [activeTab, setActiveTab] = useState<"Semua" | "Terdekat">("Semua");
+  const [activeTab, setActiveTab] = useState<"Semua" | "Live">("Semua");
   const [users, setUsers] = useState<VavaUser[]>([]);
   const [status, setStatus] = useState<PageStatus>("loading");
   const [errorMsg, setErrorMsg] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [sessions, setSessions] = useState<Record<number, AgoraSession>>({});
-  const [loadingSession, setLoadingSession] = useState<number | null>(null);
-  const [liveSession, setLiveSession] = useState<AgoraSession | null>(null);
-  const [searchingUserId, setSearchingUserId] = useState<number | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
-  const retryCountRef = useRef<Record<number, number>>({});
 
+  // Passive WS relay: when a live session arrives, assign it to the active card
   const handleLiveSession = useCallback((s: AgoraSession) => {
-    setLiveSession(s);
-    setSearchingUserId(null);
     setActiveIndex((ai) => {
       setUsers((us) => {
         if (us.length > 0 && ai < us.length) {
@@ -744,74 +617,15 @@ export default function FaVidCall() {
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
 
-  // Filter Indonesian users
   const indonesianUsers = users.filter(
     (u) => u.countryCode === "ID" || u.country.toLowerCase().includes("indonesia") || u.countryCode === ""
   );
   const baseUsers = indonesianUsers.length > 0 ? indonesianUsers : users;
   const effectiveUsers =
-    activeTab === "Terdekat"
-      ? baseUsers.filter((u) => u.distance !== null).concat(baseUsers.filter((u) => u.distance === null))
+    activeTab === "Live"
+      ? baseUsers.filter((u) => u.busy || u.withVideoPass).concat(baseUsers.filter((u) => !u.busy && !u.withVideoPass))
       : baseUsers;
 
-  // Auto-connect when active card changes and no session yet
-  useEffect(() => {
-    if (!effectiveUsers.length || status !== "ok") return undefined;
-    const activeUser = effectiveUsers[activeIndex];
-    if (!activeUser) return undefined;
-    if (!sessions[activeUser.userId] && searchingUserId !== activeUser.userId && loadingSession !== activeUser.userId) {
-      const t = setTimeout(() => handleConnect(activeUser.userId), 600);
-      return () => clearTimeout(t);
-    }
-    return undefined;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeIndex, status, effectiveUsers.length]);
-
-  const handleConnect = useCallback(async (userId: number) => {
-    if (liveSession) {
-      setSessions((prev) => ({ ...prev, [userId]: liveSession }));
-      setSearchingUserId(null);
-      return;
-    }
-    setSearchingUserId(userId);
-    setLoadingSession(userId);
-    try {
-      const res = await fetch(`${BASE}/api/vava/session`, { method: "POST" });
-      const data = await res.json();
-      if (data.success && data.channel && data.token) {
-        setSessions((prev) => ({
-          ...prev,
-          [userId]: { channel: data.channel, token: data.token, uid: data.uid, peerId: data.peerId, orderNo: data.orderNo, source: "api" },
-        }));
-        setSearchingUserId(null);
-      } else {
-        // No coins / waiting - keep searching overlay, WS relay will deliver session
-        const count = (retryCountRef.current[userId] ?? 0) + 1;
-        retryCountRef.current[userId] = count;
-        if (count > 2) {
-          // Stay in searching state - WS will deliver when match arrives
-          retryCountRef.current[userId] = 0;
-        }
-      }
-    } catch {
-      // Ignore error, searching overlay stays
-    } finally {
-      setLoadingSession(null);
-    }
-  }, [liveSession]);
-
-  const handleDisconnect = useCallback((userId: number) => {
-    setSessions((prev) => {
-      const next = { ...prev };
-      delete next[userId];
-      return next;
-    });
-    setSearchingUserId(null);
-    setLoadingSession(null);
-    retryCountRef.current[userId] = 0;
-  }, []);
-
-  // Scroll snap navigation
   const scrollToIndex = (idx: number) => {
     const el = feedRef.current;
     if (!el) return;
@@ -828,18 +642,16 @@ export default function FaVidCall() {
 
   if (status === "loading") {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4"
-        style={{ background: "#0d1117" }}>
+      <div className="flex flex-col items-center justify-center h-full gap-4" style={{ background: "#0d1117" }}>
         <div className="w-12 h-12 rounded-full border-4 border-white/20 border-t-[#EE1D52] animate-spin" />
-        <p className="text-white/60 text-sm">Memuat pengguna Indonesia…</p>
+        <p className="text-white/60 text-sm">Memuat siaran VAVA Indonesia…</p>
       </div>
     );
   }
 
   if (status === "error") {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-5 px-8"
-        style={{ background: "#0d1117" }}>
+      <div className="flex flex-col items-center justify-center h-full gap-5 px-8" style={{ background: "#0d1117" }}>
         <WifiOff size={48} color="rgba(255,255,255,0.3)" />
         <p className="text-white/80 text-base font-semibold text-center">{errorMsg}</p>
         <button onClick={fetchUsers}
@@ -858,7 +670,7 @@ export default function FaVidCall() {
         style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, transparent 100%)" }}>
         <div className="flex items-center gap-1 pointer-events-auto"
           style={{ background: "rgba(255,255,255,0.1)", borderRadius: 20, padding: "3px 4px", backdropFilter: "blur(6px)" }}>
-          {(["Semua", "Terdekat"] as const).map((tab) => (
+          {(["Semua", "Live"] as const).map((tab) => (
             <button key={tab}
               className="px-4 py-1.5 rounded-2xl text-xs font-bold transition-all"
               style={{
@@ -866,7 +678,7 @@ export default function FaVidCall() {
                 color: "white",
               }}
               onClick={() => { setActiveTab(tab); setActiveIndex(0); scrollToIndex(0); }}>
-              {tab}
+              {tab === "Live" ? "🔴 Sedang Live" : tab}
             </button>
           ))}
         </div>
@@ -892,7 +704,7 @@ export default function FaVidCall() {
       <div className="absolute top-28 left-3 z-50 flex items-center gap-1 px-2.5 py-1 rounded-full"
         style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }}>
         <Zap size={11} color="#EE1D52" />
-        <span className="text-white/80 text-[10px] font-semibold">{effectiveUsers.length} online</span>
+        <span className="text-white/80 text-[10px] font-semibold">{effectiveUsers.length} penonton</span>
       </div>
 
       {/* Feed */}
@@ -905,37 +717,17 @@ export default function FaVidCall() {
         <style>{`.feed-scroll::-webkit-scrollbar{display:none}`}</style>
         {effectiveUsers.map((user, i) => {
           const session = sessions[user.userId] ?? null;
-          const isLoading = loadingSession === user.userId;
-          const isSearching = searchingUserId === user.userId;
-
           return (
             <div key={user.userId}
               className="relative w-full"
               style={{ height: "100svh", scrollSnapAlign: "start", scrollSnapStop: "always" }}>
-              <VidCallCard
+              <LiveCard
                 user={user}
                 index={i}
                 isActive={i === activeIndex}
                 session={session}
-                sessionLoading={isLoading}
                 wsStatus={wsStatus}
-                onConnect={() => handleConnect(user.userId)}
-                onDisconnect={() => handleDisconnect(user.userId)}
               />
-
-              {/* Searching overlay for this card */}
-              <AnimatePresence>
-                {isSearching && !session && (
-                  <SearchingOverlay
-                    user={user}
-                    onCancel={() => {
-                      setSearchingUserId(null);
-                      setLoadingSession(null);
-                      retryCountRef.current[user.userId] = 0;
-                    }}
-                  />
-                )}
-              </AnimatePresence>
 
               {/* Dot indicator */}
               <div className="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-20"
@@ -958,11 +750,7 @@ export default function FaVidCall() {
       {/* Bottom nav hint */}
       <div className="absolute bottom-0 left-0 right-0 z-40 flex items-center justify-center pb-6 pt-3 pointer-events-none"
         style={{ background: "linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 100%)" }}>
-        <div className="flex items-center gap-3">
-          <Star size={12} color="rgba(255,255,255,0.4)" />
-          <span className="text-white/40 text-[10px] font-medium">Geser untuk melihat lebih banyak</span>
-          <Star size={12} color="rgba(255,255,255,0.4)" />
-        </div>
+        <p className="text-white/40 text-[10px] font-medium">Geser untuk melihat lebih banyak siaran</p>
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { fetch as undiciFetch } from "undici";
+import { fetch as undiciFetch, ProxyAgent } from "undici";
 import crypto from "crypto";
 
 const execFileAsync = promisify(execFile);
@@ -12,6 +12,7 @@ const MERCHANT_ID = process.env.HOT51_MERCHANT_ID ?? "501";
 const HOT51_BASE = process.env.HOT51_API_BASE ?? "https://api.fsccdn.com";
 const STREAM_KEY = process.env.HOT51_STREAM_KEY ?? "4ad75f5e2eb06d315ea14e8484a29e1d";
 const PROXY_URL = process.env.HOT51_PROXY_URL ?? "";
+const proxyAgent = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
 
 const ZEGO_APP_ID = 975_360_885;
 const ZEGO_APP_SIGN = "968077d0acc44519d02de6d9c5ed7b0885479810224e9b3ac1c59d20dc25b009";
@@ -594,6 +595,7 @@ liveRouter.get("/stream-proxy", async (req: Request, res: Response) => {
     try {
       const upstream = await undiciFetch(streamUrl, {
         headers: cdnHeaders,
+        dispatcher: proxyAgent,
         signal: AbortSignal.timeout(6_000),
       });
 
