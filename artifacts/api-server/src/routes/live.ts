@@ -16,11 +16,11 @@ const PROXY_URL = process.env.HOT51_PROXY_URL ?? "";
 const ZEGO_APP_ID = 975_360_885;
 const ZEGO_APP_SIGN = "968077d0acc44519d02de6d9c5ed7b0885479810224e9b3ac1c59d20dc25b009";
 
-const CDN_NODES = ["bcdn1", "bcdn2", "bcdn3", "bcdn4", "bcdn5", "bcdn6"];
+const CDN_NODES = ["bcdn5", "bcdn1", "bcdn2", "bcdn3", "bcdn4", "bcdn6", "pull.bcdn5"];
 
 const APP_HEADERS: Record<string, string> = {
   merchantId: MERCHANT_ID,
-  Authorization: process.env.HOT51_AUTH ?? "Basic YXBwLXBsYXNlcjphcHB0bGF5ZXIyMDIxKjk2My4=",
+  Authorization: process.env.HOT51_AUTH ?? "Basic YXBwLXBsYXllcjphcHBQbGF5ZXIyMDIxKjk2My4=",
   "locale-language": "ENU",
   device: process.env.HOT51_DEVICE ?? "08b55ddbd0debc1fa8cdc7127240d402",
   area: "ID",
@@ -66,12 +66,14 @@ function buildCDNUrls(roomId: string, anchorId?: string): string[] {
   const urls: string[] = [];
   const key = STREAM_KEY;
   for (const node of CDN_NODES) {
-    urls.push(`https://${node}.livcdn.com/live/${MERCHANT_ID}_${roomId}_${key}.flv`);
+    if (node.startsWith("pull.")) {
+      urls.push(`https://${node}.livcdn.com/live/${MERCHANT_ID}_${roomId}_${key}.flv`);
+    } else {
+      urls.push(`https://${node}.livcdn.com/live/${MERCHANT_ID}_${roomId}_${key}.flv`);
+    }
   }
   if (anchorId && anchorId !== roomId) {
-    for (const node of CDN_NODES) {
-      urls.push(`https://${node}.livcdn.com/live/${MERCHANT_ID}_${anchorId}_${key}.flv`);
-    }
+    urls.push(`https://bcdn5.livcdn.com/live/${MERCHANT_ID}_${anchorId}_${key}.flv`);
   }
   return urls;
 }

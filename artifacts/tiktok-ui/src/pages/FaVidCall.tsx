@@ -754,6 +754,19 @@ export default function FaVidCall() {
       ? baseUsers.filter((u) => u.distance !== null).concat(baseUsers.filter((u) => u.distance === null))
       : baseUsers;
 
+  // Auto-connect when active card changes and no session yet
+  useEffect(() => {
+    if (!effectiveUsers.length || status !== "ok") return undefined;
+    const activeUser = effectiveUsers[activeIndex];
+    if (!activeUser) return undefined;
+    if (!sessions[activeUser.userId] && searchingUserId !== activeUser.userId && loadingSession !== activeUser.userId) {
+      const t = setTimeout(() => handleConnect(activeUser.userId), 600);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndex, status, effectiveUsers.length]);
+
   const handleConnect = useCallback(async (userId: number) => {
     if (liveSession) {
       setSessions((prev) => ({ ...prev, [userId]: liveSession }));

@@ -354,7 +354,7 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
         appId: AGORA_APP_ID,
         channel: d.channel,
         token: d.authToken ?? d.agoraToken,
-        uid: parseInt(CREDS.userId, 10),
+        uid: 0,
         peerId: d.peerId ?? d.peerUserId ?? null,
         orderNo: d.orderNo ?? null,
       });

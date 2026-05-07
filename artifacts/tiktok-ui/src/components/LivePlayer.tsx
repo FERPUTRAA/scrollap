@@ -36,21 +36,18 @@ export default function LivePlayer({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [visible, setVisible] = useState(false);
 
-  // Callback ref so Zego hook gets the real DOM element
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
   const videoCallbackRef = useCallback((el: HTMLVideoElement | null) => setVideoEl(el), []);
 
   const playerRef = useRef<mpegts.Player | null>(null);
   const [state, setState] = useState<PlayerState>("idle");
   const [muted, setMuted] = useState(true);
-  const [errorMsg, setErrorMsg] = useState("");
   const [mode, setMode] = useState<PlayerMode>("none");
-  // zegoActive: only true when user manually clicks "Zego RTC" button
   const [zegoActive, setZegoActive] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const startedRef = useRef(false);
+  const zegoTriedRef = useRef(false);
 
-  // Intersection observer — only play when this card is on screen
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -74,12 +71,21 @@ export default function LivePlayer({
     }
   }, []);
 
+  const startZego = useCallback(() => {
+    if (!zegoStreamId || zegoTriedRef.current) return;
+    destroyFlvPlayer();
+    if (videoEl) try { videoEl.srcObject = null; } catch { /* ignore */ }
+    setState("loading");
+    setMode("none");
+    zegoTriedRef.current = true;
+    setZegoActive(true);
+  }, [zegoStreamId, destroyFlvPlayer, videoEl]);
+
   const startFlv = useCallback((url: string, el: HTMLVideoElement) => {
     destroyFlvPlayer();
     try { el.srcObject = null; } catch { /* ignore */ }
 
     setState("loading");
-    setErrorMsg("");
     setMode("flv");
 
     const player = mpegts.createPlayer(
@@ -101,12 +107,11 @@ export default function LivePlayer({
 
     player.on(mpegts.Events.ERROR, () => {
       destroyFlvPlayer();
-      setState("blocked");
-      setErrorMsg(
-        hasAuth
-          ? "CDN Hot51 tidak dapat diakses dari server ini."
-          : "Login ke Hot51 untuk mendapatkan URL stream asli."
-      );
+      if (zegoStreamId && !zegoTriedRef.current) {
+        startZego();
+      } else {
+        setState("blocked");
+      }
     });
 
     player.on(mpegts.Events.MEDIA_INFO, () => {
@@ -115,11 +120,10 @@ export default function LivePlayer({
     });
 
     el.play().catch(() => {});
-  }, [destroyFlvPlayer, hasAuth]);
+  }, [destroyFlvPlayer, zegoStreamId, startZego]);
 
   const tryProxy = useCallback(async (el: HTMLVideoElement) => {
     setState("loading");
-    setErrorMsg("");
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     try {
@@ -134,25 +138,29 @@ export default function LivePlayer({
         if (r.ok) {
           startFlv(toAbsoluteUrl(proxyUrl), el);
         } else {
-          const body = await r.json().catch(() => ({})) as Record<string, unknown>;
-          setState("blocked");
-          setErrorMsg(String(body.error ?? `Proxy error ${r.status}`));
+          if (zegoStreamId && !zegoTriedRef.current) {
+            startZego();
+          } else {
+            setState("blocked");
+          }
         }
       }
     } catch (e) {
       if ((e as { name?: string }).name !== "AbortError") {
-        setState("error");
-        setErrorMsg("Koneksi ke server gagal");
+        if (zegoStreamId && !zegoTriedRef.current) {
+          startZego();
+        } else {
+          setState("error");
+        }
       }
     }
-  }, [roomId, anchorId, liveId, startFlv]);
+  }, [roomId, anchorId, liveId, startFlv, zegoStreamId, startZego]);
 
   const startCdn = useCallback((el: HTMLVideoElement) => {
     if (streamUrl) startFlv(toAbsoluteUrl(streamUrl), el);
     else tryProxy(el);
   }, [streamUrl, startFlv, tryProxy]);
 
-  // Zego callbacks
   const handleZegoPlaying = useCallback(() => {
     setMode("zego");
     setState("playing");
@@ -160,10 +168,9 @@ export default function LivePlayer({
 
   const handleZegoError = useCallback((_msg: string) => {
     setZegoActive(false);
-    if (videoEl) startCdn(videoEl);
-  }, [videoEl, startCdn]);
+    setState("blocked");
+  }, []);
 
-  // Zego only connects when user clicks the button
   useZegoPlayer({
     roomId,
     anchorId,
@@ -173,14 +180,12 @@ export default function LivePlayer({
     onError: handleZegoError,
   });
 
-  // Start playback when card becomes visible AND video element is mounted
   useEffect(() => {
     if (!visible || !videoEl || startedRef.current) return;
     startedRef.current = true;
     startCdn(videoEl);
   }, [visible, videoEl, startCdn]);
 
-  // Pause/resume when visibility changes
   useEffect(() => {
     if (!videoEl) return;
     if (visible) {
@@ -190,19 +195,17 @@ export default function LivePlayer({
     }
   }, [visible, videoEl]);
 
-  // Reset when roomId changes
   useEffect(() => {
     startedRef.current = false;
+    zegoTriedRef.current = false;
     setZegoActive(false);
     setState("idle");
-    setErrorMsg("");
     setMode("none");
     abortRef.current?.abort();
     destroyFlvPlayer();
     if (videoEl) try { videoEl.srcObject = null; } catch { /* ignore */ }
   }, [roomId]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -211,24 +214,16 @@ export default function LivePlayer({
   }, []);
 
   function handleRetry() {
+    zegoTriedRef.current = false;
     setZegoActive(false);
     startedRef.current = false;
     setState("idle");
-    setErrorMsg("");
     destroyFlvPlayer();
     if (videoEl) {
       try { videoEl.srcObject = null; } catch { /* ignore */ }
       startedRef.current = true;
       startCdn(videoEl);
     }
-  }
-
-  function handleTryZego() {
-    destroyFlvPlayer();
-    if (videoEl) try { videoEl.srcObject = null; } catch { /* ignore */ }
-    setState("loading");
-    setErrorMsg("");
-    setZegoActive(true);
   }
 
   return (
@@ -256,25 +251,12 @@ export default function LivePlayer({
             style={{ borderColor: "#EE1D52 transparent transparent transparent" }}
           />
           <p className="text-white/40 text-[10px]">
-            {zegoActive ? "Mencoba Zego RTC…" : "Memuat stream…"}
+            {zegoActive ? "Menghubungkan RTC…" : "Memuat stream…"}
           </p>
         </div>
       )}
 
-      {state === "error" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-10 gap-2 px-6">
-          <p className="text-white/60 text-[11px] text-center leading-relaxed">{errorMsg}</p>
-          <button
-            onClick={handleRetry}
-            className="px-4 py-1.5 rounded-full text-white text-xs font-bold"
-            style={{ background: "#EE1D52" }}
-          >
-            Coba Lagi
-          </button>
-        </div>
-      )}
-
-      {state === "blocked" && (
+      {(state === "error" || state === "blocked") && (
         <div className="absolute inset-0 flex flex-col items-center justify-center z-10 gap-2 px-6">
           <div
             className="w-10 h-10 rounded-full flex items-center justify-center mb-1"
@@ -286,32 +268,16 @@ export default function LivePlayer({
               <line x1="12" y1="16" x2="12.01" y2="16"/>
             </svg>
           </div>
-          <p className="text-white text-xs font-semibold text-center">
-            {hasAuth ? "CDN Diblokir" : "Login Diperlukan"}
+          <p className="text-white/60 text-[11px] text-center leading-relaxed">
+            Stream tidak dapat diakses dari server ini
           </p>
-          <p className="text-white/50 text-[10px] text-center leading-relaxed px-2">
-            {errorMsg || (hasAuth
-              ? "CDN Hot51 memblokir IP server ini."
-              : "Login ke Hot51 untuk mendapatkan URL stream asli.")}
-          </p>
-          <div className="flex gap-2 mt-1">
-            <button
-              onClick={handleRetry}
-              className="px-3 py-1.5 rounded-full text-white text-xs font-bold"
-              style={{ background: "rgba(255,255,255,0.15)" }}
-            >
-              CDN
-            </button>
-            {zegoStreamId && (
-              <button
-                onClick={handleTryZego}
-                className="px-3 py-1.5 rounded-full text-white text-xs font-bold"
-                style={{ background: "#EE1D52" }}
-              >
-                Zego RTC
-              </button>
-            )}
-          </div>
+          <button
+            onClick={handleRetry}
+            className="px-4 py-1.5 rounded-full text-white text-xs font-bold"
+            style={{ background: "#EE1D52" }}
+          >
+            Coba Lagi
+          </button>
         </div>
       )}
 

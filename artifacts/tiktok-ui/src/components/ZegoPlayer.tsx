@@ -50,11 +50,11 @@ async function getZegoToken(userId: string): Promise<string> {
 }
 
 function safeDestroy(engine: ZegoEngine, roomId: string): void {
+  try { engine.stopPlayingStream?.(roomId); } catch { /* ignore */ }
   try { engine.logoutRoom(roomId); } catch { /* ignore */ }
   try { engine.destroyEngine?.(); } catch { /* ignore */ }
 }
 
-/** Race a promise against a timeout; rejects with TimeoutError on timeout */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     promise,
@@ -90,6 +90,24 @@ export function useZegoPlayer({
     const userId = `viewer_${Math.random().toString(36).slice(2, 10)}`;
     let engine: ZegoEngine | null = null;
 
+    const tryPlayStream = async (eng: ZegoEngine, streamId: string): Promise<boolean> => {
+      try {
+        const stream: MediaStream = await withTimeout(
+          eng.startPlayingStream(streamId),
+          5_000
+        );
+        if (!mountedRef.current) return false;
+        videoEl.srcObject = stream;
+        videoEl.muted = true;
+        videoEl.play().catch(() => {});
+        playingRef.current = true;
+        onPlayingRef.current();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
     const run = async (): Promise<void> => {
       try {
         const [ZegoExpressEngine, config, token] = await withTimeout(
@@ -102,27 +120,22 @@ export function useZegoPlayer({
         engine = new ZegoExpressEngine(config.appId, server);
         engineRef.current = engine;
 
-        engine.on("roomStreamUpdate", (_rId: unknown, updateType: unknown, streamList: unknown) => {
-          if (!mountedRef.current || updateType !== "ADD") return;
-          const list = streamList as ZegoStream[];
-          if (!list?.length) return;
-          const target = list.find(s => s.streamID === zegoStreamId) ?? list[0];
-          if (target && !playingRef.current) {
-            playingRef.current = true;
-            engine!.startPlayingStream(target.streamID)
-              .then((stream: MediaStream) => {
-                if (!mountedRef.current) return;
-                videoEl.srcObject = stream;
-                videoEl.muted = true;
-                videoEl.play().catch(() => {});
-                onPlayingRef.current();
-              })
-              .catch((e: Error) => {
-                if (mountedRef.current) onErrorRef.current(`Play failed: ${e.message}`);
-              });
-          }
-        });
+        // Strategy 1: try CDN direct playback (no room join) with stream ID variants
+        const streamCandidates = [
+          zegoStreamId,
+          `${config.merchantId}_${anchorId}`,
+          `${config.merchantId}_${roomId}`,
+          anchorId,
+          roomId,
+        ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
 
+        for (const sid of streamCandidates) {
+          if (!mountedRef.current) return;
+          const ok = await tryPlayStream(engine, sid);
+          if (ok) return;
+        }
+
+        // Strategy 2: join room and wait for roomStreamUpdate
         const roomCandidates = [
           roomId,
           anchorId,
@@ -130,13 +143,25 @@ export function useZegoPlayer({
           `${config.merchantId}_${roomId}`,
         ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
 
+        engine.on("roomStreamUpdate", (_rId: unknown, updateType: unknown, streamList: unknown) => {
+          if (!mountedRef.current || updateType !== "ADD" || playingRef.current) return;
+          const list = streamList as ZegoStream[];
+          if (!list?.length) return;
+          const target = list.find(s => s.streamID === zegoStreamId) ?? list[0];
+          if (target) {
+            tryPlayStream(engine!, target.streamID).catch(() => {
+              if (mountedRef.current) onErrorRef.current("Play failed");
+            });
+          }
+        });
+
         let loggedInRoom: string | null = null;
         for (const rid of roomCandidates) {
           if (!mountedRef.current) return;
           try {
             const ok: boolean = await withTimeout(
               engine.loginRoom(rid, token, { userID: userId, userName: "viewer" }),
-              3_000
+              2_000
             );
             if (ok) { loggedInRoom = rid; break; }
           } catch {
@@ -147,16 +172,16 @@ export function useZegoPlayer({
         loginRoomRef.current = loggedInRoom;
 
         if (!loggedInRoom) {
-          if (mountedRef.current) onErrorRef.current("Cannot join Zego room (Hot51 uses CDN)");
+          if (mountedRef.current) onErrorRef.current("CDN geo-blocked");
           return;
         }
 
-        // Give streams 5s to appear after login
+        // Wait for streams to appear (shorter timeout)
         setTimeout(() => {
           if (mountedRef.current && !playingRef.current) {
-            onErrorRef.current("No RTC stream in room (CDN-only)");
+            onErrorRef.current("No stream available");
           }
-        }, 5_000);
+        }, 4_000);
       } catch (e) {
         if (mountedRef.current) {
           onErrorRef.current(e instanceof Error ? e.message : "Zego error");
