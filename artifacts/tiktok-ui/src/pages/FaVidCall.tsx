@@ -18,18 +18,16 @@ import {
   Share2,
   UserPlus,
   Mic,
-  MicOff,
-  Video,
-  VideoOff,
-  Users,
-  RefreshCw,
-  WifiOff,
   CheckCircle,
   Globe,
   Signal,
-  Wifi,
   Volume2,
   VolumeX,
+  Users,
+  RefreshCw,
+  WifiOff,
+  Wifi,
+  Radio,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -53,6 +51,7 @@ interface VavaUser {
   countryFlagUrl: string;
   language: string;
   distance: string | null;
+  tags?: string[];
 }
 
 interface AgoraSession {
@@ -60,14 +59,11 @@ interface AgoraSession {
   token: string;
   uid: number;
   peerId: number | null;
+  orderNo?: string | null;
+  source?: "ws" | "api";
 }
 
-type StreamState =
-  | "idle"
-  | "connecting"
-  | "connected"
-  | "no_stream"
-  | "error";
+type StreamState = "idle" | "connecting" | "connected" | "no_stream" | "error";
 
 const GRADIENTS = [
   "linear-gradient(160deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%)",
@@ -76,6 +72,8 @@ const GRADIENTS = [
   "linear-gradient(160deg,#1f1c2c 0%,#3a1f5e 50%,#928dab 100%)",
   "linear-gradient(160deg,#141e30 0%,#0a2342 50%,#243b55 100%)",
   "linear-gradient(160deg,#0f0c29 0%,#302b63 50%,#24243e 100%)",
+  "linear-gradient(160deg,#200122 0%,#6f0000 50%,#200122 100%)",
+  "linear-gradient(160deg,#0d0d0d 0%,#1a1a1a 50%,#0d2137 100%)",
 ];
 
 function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null) {
@@ -101,7 +99,6 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
 
   useEffect(() => {
     if (!session || !videoEl) return;
-
     let cancelled = false;
 
     async function join() {
@@ -110,7 +107,6 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
 
       const client = AgoraRTC.createClient({ mode: "live", codec: "h264" });
       clientRef.current = client;
-
       await client.setClientRole("audience");
 
       client.on("user-published", async (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
@@ -120,10 +116,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
           const track = user.videoTrack;
           if (track && videoEl) {
             track.play(videoEl);
-            if (!cancelled) {
-              setRemoteVideo(track);
-              setStreamState("connected");
-            }
+            if (!cancelled) { setRemoteVideo(track); setStreamState("connected"); }
           }
         }
         if (mediaType === "audio") {
@@ -135,32 +128,16 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
         }
       });
 
-      client.on("user-unpublished", (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
-        if (mediaType === "video") {
-          setRemoteVideo(null);
-          setStreamState("no_stream");
-        }
-        if (mediaType === "audio") {
-          setRemoteAudio(null);
-        }
+      client.on("user-unpublished", (_user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
+        if (mediaType === "video") { setRemoteVideo(null); setStreamState("no_stream"); }
+        if (mediaType === "audio") setRemoteAudio(null);
       });
 
-      client.on("user-left", () => {
-        if (!cancelled) setStreamState("no_stream");
-      });
+      client.on("user-left", () => { if (!cancelled) setStreamState("no_stream"); });
 
       try {
-        await client.join(
-          AGORA_APP_ID,
-          session.channel,
-          session.token,
-          session.uid
-        );
-
-        if (cancelled) {
-          await client.leave();
-          return;
-        }
+        await client.join(AGORA_APP_ID, session.channel, session.token, session.uid);
+        if (cancelled) { await client.leave(); return; }
 
         const remoteUsers = client.remoteUsers;
         if (remoteUsers.length === 0) {
@@ -172,10 +149,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
               const track = user.videoTrack;
               if (track && videoEl) {
                 track.play(videoEl);
-                if (!cancelled) {
-                  setRemoteVideo(track);
-                  setStreamState("connected");
-                }
+                if (!cancelled) { setRemoteVideo(track); setStreamState("connected"); }
               }
             }
             if (user.hasAudio) {
@@ -197,20 +171,13 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
     }
 
     join();
-
-    return () => {
-      cancelled = true;
-      cleanup();
-    };
+    return () => { cancelled = true; cleanup(); };
   }, [session, videoEl]);
 
   const toggleMute = useCallback(() => {
     if (remoteAudio) {
-      if (muted) {
-        remoteAudio.play();
-      } else {
-        remoteAudio.stop();
-      }
+      if (muted) remoteAudio.play();
+      else remoteAudio.stop();
       setMuted((m) => !m);
     }
   }, [remoteAudio, muted]);
@@ -229,13 +196,7 @@ interface CardProps {
 }
 
 const VidCallCard = memo(function VidCallCard({
-  user,
-  index,
-  isActive,
-  session,
-  sessionLoading,
-  onConnect,
-  onDisconnect,
+  user, index, isActive, session, sessionLoading, onConnect, onDisconnect,
 }: CardProps) {
   const [liked, setLiked] = useState(false);
   const [showHeart, setShowHeart] = useState(false);
@@ -247,9 +208,7 @@ const VidCallCard = memo(function VidCallCard({
   const { streamState, muted, toggleMute } = useAgoraViewer(activeSession, videoEl);
 
   useEffect(() => {
-    if (videoContainerRef.current) {
-      setVideoEl(videoContainerRef.current);
-    }
+    if (videoContainerRef.current) setVideoEl(videoContainerRef.current);
   }, []);
 
   const handleDoubleTap = () => {
@@ -260,7 +219,6 @@ const VidCallCard = memo(function VidCallCard({
 
   const avatarFallback = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName)}&background=EE1D52&color=fff&size=400&bold=true`;
   const mainImg = !imgError && user.profilePictureUrl ? user.profilePictureUrl : avatarFallback;
-
   const isStreaming = streamState === "connected";
   const isConnecting = streamState === "connecting" || sessionLoading;
 
@@ -270,46 +228,43 @@ const VidCallCard = memo(function VidCallCard({
       style={{ background: GRADIENTS[index % GRADIENTS.length] }}
       onDoubleClick={handleDoubleTap}
     >
-      {/* Profile image background (always shown as background) */}
+      {/* Profile background */}
       <img
         src={mainImg}
         alt={user.displayName}
         className="absolute inset-0 w-full h-full object-cover"
-        style={{ opacity: isStreaming ? 0.12 : 0.6 }}
+        style={{ opacity: isStreaming ? 0.1 : 0.55, transition: "opacity 0.5s" }}
         onError={() => setImgError(true)}
       />
 
-      {/* Agora live video container - fills the screen */}
+      {/* Agora live video */}
       <div
         ref={videoContainerRef}
         className="absolute inset-0 w-full h-full"
-        style={{
-          display: isStreaming ? "block" : "none",
-          zIndex: 5,
-        }}
+        style={{ display: isStreaming ? "block" : "none", zIndex: 5 }}
       />
 
-      {/* Dark overlay */}
+      {/* Overlay */}
       <div
         className="absolute inset-0 pointer-events-none"
         style={{
           background: isStreaming
-            ? "linear-gradient(to top, rgba(0,0,0,0.85) 0%, transparent 40%)"
-            : "rgba(0,0,0,0.32)",
+            ? "linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 45%)"
+            : "rgba(0,0,0,0.28)",
           zIndex: 6,
         }}
       />
 
       {/* Blur when no stream */}
       {!isStreaming && (
-        <div className="absolute inset-0 pointer-events-none" style={{ backdropFilter: "blur(2px)", zIndex: 7 }} />
+        <div className="absolute inset-0 pointer-events-none" style={{ backdropFilter: "blur(1.5px)", zIndex: 7 }} />
       )}
 
-      {/* Ambient glows */}
-      <div className="absolute top-[8%] left-[4%] w-44 h-44 rounded-full opacity-15 blur-3xl pointer-events-none" style={{ background: "#69C9D0", zIndex: 8 }} />
-      <div className="absolute bottom-[20%] right-[4%] w-52 h-52 rounded-full opacity-12 blur-3xl pointer-events-none" style={{ background: "#EE1D52", zIndex: 8 }} />
+      {/* Ambient glow */}
+      <div className="absolute top-[8%] left-[4%] w-40 h-40 rounded-full opacity-15 blur-3xl pointer-events-none" style={{ background: "#69C9D0", zIndex: 8 }} />
+      <div className="absolute bottom-[20%] right-[4%] w-48 h-48 rounded-full opacity-10 blur-3xl pointer-events-none" style={{ background: "#EE1D52", zIndex: 8 }} />
 
-      {/* Double-tap heart animation */}
+      {/* Double-tap heart */}
       <AnimatePresence>
         {showHeart && (
           <motion.div
@@ -328,7 +283,7 @@ const VidCallCard = memo(function VidCallCard({
       {/* Top bar */}
       <div
         className="absolute top-0 left-0 right-0 flex items-center justify-between px-4 pt-12 pb-5 pointer-events-none"
-        style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, transparent 100%)", zIndex: 20 }}
+        style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%)", zIndex: 20 }}
       >
         <div className="flex items-center gap-2">
           {isStreaming ? (
@@ -344,33 +299,28 @@ const VidCallCard = memo(function VidCallCard({
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[11px] font-bold"
               style={{ background: "rgba(238,29,82,0.8)", backdropFilter: "blur(6px)" }}
             >
-              <Video size={10} />
+              <Radio size={10} />
               VIDEO CALL
-            </span>
-          )}
-          {user.callCost > 0 && (
-            <span
-              className="flex items-center gap-1 px-2 py-1 rounded-full text-yellow-300 text-[10px] font-bold"
-              style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }}
-            >
-              🪙 {user.callCost}/mnt
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
-          {isStreaming && (
+          {session && (
             <span
               className="flex items-center gap-1 text-white text-[10px] font-bold px-2.5 py-1 rounded-full"
-              style={{ background: "rgba(34,197,94,0.4)", border: "1px solid rgba(34,197,94,0.6)" }}
+              style={{
+                background: isStreaming ? "rgba(34,197,94,0.4)" : "rgba(250,204,21,0.35)",
+                border: `1px solid ${isStreaming ? "rgba(34,197,94,0.6)" : "rgba(250,204,21,0.5)"}`,
+              }}
             >
               <Signal size={10} />
-              RTC
+              {isStreaming ? "RTC LIVE" : "CH: " + session.channel.slice(0, 8)}
             </span>
           )}
-          {!isStreaming && (
+          {!session && (
             <span
               className="flex items-center gap-1 text-white text-[10px] font-bold px-2.5 py-1 rounded-full"
-              style={{ background: "rgba(34,197,94,0.3)", border: "1px solid rgba(34,197,94,0.5)" }}
+              style={{ background: "rgba(34,197,94,0.25)", border: "1px solid rgba(34,197,94,0.4)" }}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
               ONLINE
@@ -379,7 +329,7 @@ const VidCallCard = memo(function VidCallCard({
         </div>
       </div>
 
-      {/* Connecting / loading overlay */}
+      {/* Connecting */}
       <AnimatePresence>
         {isConnecting && (
           <motion.div
@@ -390,42 +340,56 @@ const VidCallCard = memo(function VidCallCard({
             exit={{ opacity: 0 }}
           >
             <div className="w-16 h-16 rounded-full border-4 border-white/20 border-t-white animate-spin" />
-            <p className="text-white/80 text-sm font-medium">Menghubungkan stream...</p>
+            <p className="text-white/80 text-sm font-medium">Menghubungkan ke RTC...</p>
+            {session && <p className="text-white/50 text-xs font-mono">ch: {session.channel.slice(0, 16)}…</p>}
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* No stream info overlay */}
+      {/* No stream notice */}
       {streamState === "no_stream" && !isConnecting && isActive && (
         <div
           className="absolute left-4 right-4 flex items-center gap-2 px-3 py-2 rounded-xl"
           style={{
-            top: "50%",
-            transform: "translateY(-50%)",
+            top: "50%", transform: "translateY(-50%)",
             background: "rgba(0,0,0,0.55)",
             border: "1px solid rgba(255,255,255,0.1)",
-            backdropFilter: "blur(8px)",
-            zIndex: 20,
+            backdropFilter: "blur(8px)", zIndex: 20,
           }}
         >
           <Wifi size={14} color="rgba(255,255,255,0.6)" />
-          <p className="text-white/70 text-xs">Terhubung ke channel - menunggu host live</p>
+          <div>
+            <p className="text-white/80 text-xs font-semibold">Terhubung ke channel Agora</p>
+            <p className="text-white/50 text-[10px]">Menunggu host mulai streaming…</p>
+          </div>
         </div>
       )}
 
-      {/* Profile photo panel - shown when NOT streaming */}
+      {/* Error notice */}
+      {streamState === "error" && !isConnecting && isActive && (
+        <div
+          className="absolute left-4 right-4 flex items-center gap-2 px-3 py-2 rounded-xl"
+          style={{
+            top: "50%", transform: "translateY(-50%)",
+            background: "rgba(238,29,82,0.15)",
+            border: "1px solid rgba(238,29,82,0.3)",
+            backdropFilter: "blur(8px)", zIndex: 20,
+          }}
+        >
+          <WifiOff size={14} color="#EE1D52" />
+          <p className="text-white/70 text-xs">Gagal join channel. Token mungkin kadaluarsa.</p>
+        </div>
+      )}
+
+      {/* Profile photo panel (when not streaming) */}
       {!isStreaming && !isConnecting && (
         <motion.div
           className="absolute rounded-3xl overflow-hidden"
           style={{
-            top: "14%",
-            left: "8%",
-            right: "20%",
-            height: "44%",
-            background: "rgba(255,255,255,0.07)",
-            border: "1px solid rgba(255,255,255,0.13)",
-            backdropFilter: "blur(10px)",
-            zIndex: 15,
+            top: "14%", left: "8%", right: "20%", height: "44%",
+            background: "rgba(255,255,255,0.06)",
+            border: "1px solid rgba(255,255,255,0.12)",
+            backdropFilter: "blur(10px)", zIndex: 15,
           }}
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -438,7 +402,6 @@ const VidCallCard = memo(function VidCallCard({
             onError={() => setImgError(true)}
           />
           <div className="absolute inset-0" style={{ background: "linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 55%)" }} />
-
           <div className="absolute bottom-3 left-3 right-3 flex items-end justify-between">
             <div className="flex items-center gap-1.5">
               <Mic size={11} color="white" />
@@ -446,15 +409,10 @@ const VidCallCard = memo(function VidCallCard({
               {user.verified && <CheckCircle size={11} color="#69C9D0" fill="#69C9D0" />}
             </div>
             {user.countryFlagUrl && (
-              <img
-                src={user.countryFlagUrl}
-                alt={user.country}
-                className="w-5 h-4 rounded object-cover"
-                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-              />
+              <img src={user.countryFlagUrl} alt={user.country} className="w-5 h-4 rounded object-cover"
+                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
             )}
           </div>
-
           <div className="absolute top-3 right-3">
             <span className="relative flex h-3 w-3">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
@@ -474,12 +432,8 @@ const VidCallCard = memo(function VidCallCard({
       <div className="absolute right-3 bottom-[72px] flex flex-col items-center gap-5" style={{ zIndex: 30 }}>
         <div className="relative mb-1">
           <div className="w-11 h-11 rounded-full border-2 border-white overflow-hidden bg-gray-700">
-            <img
-              src={mainImg}
-              alt={user.displayName}
-              className="w-full h-full object-cover"
-              onError={(e) => { (e.target as HTMLImageElement).src = avatarFallback; }}
-            />
+            <img src={mainImg} alt={user.displayName} className="w-full h-full object-cover"
+              onError={(e) => { (e.target as HTMLImageElement).src = avatarFallback; }} />
           </div>
           <button
             className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full flex items-center justify-center"
@@ -489,26 +443,18 @@ const VidCallCard = memo(function VidCallCard({
           </button>
         </div>
 
-        <motion.button
-          className="flex flex-col items-center gap-1 mt-2"
-          whileTap={{ scale: 1.3 }}
-          onClick={(e) => { e.stopPropagation(); setLiked(!liked); }}
-        >
+        <motion.button className="flex flex-col items-center gap-1 mt-2" whileTap={{ scale: 1.3 }}
+          onClick={(e) => { e.stopPropagation(); setLiked(!liked); }}>
           <Heart size={32} fill={liked ? "#EE1D52" : "transparent"} color={liked ? "#EE1D52" : "white"} strokeWidth={1.5} />
           <span className="text-white text-xs font-semibold drop-shadow">{liked ? "Disukai" : "Suka"}</span>
         </motion.button>
 
         {isStreaming && (
-          <motion.button
-            className="flex flex-col items-center gap-1"
-            whileTap={{ scale: 1.1 }}
-            onClick={(e) => { e.stopPropagation(); toggleMute(); }}
-          >
-            {muted ? (
-              <VolumeX size={28} color="rgba(255,255,255,0.7)" strokeWidth={1.5} />
-            ) : (
-              <Volume2 size={28} color="white" strokeWidth={1.5} />
-            )}
+          <motion.button className="flex flex-col items-center gap-1" whileTap={{ scale: 1.1 }}
+            onClick={(e) => { e.stopPropagation(); toggleMute(); }}>
+            {muted
+              ? <VolumeX size={28} color="rgba(255,255,255,0.7)" strokeWidth={1.5} />
+              : <Volume2 size={28} color="white" strokeWidth={1.5} />}
             <span className="text-white text-xs font-semibold drop-shadow">{muted ? "Unmute" : "Mute"}</span>
           </motion.button>
         )}
@@ -518,18 +464,8 @@ const VidCallCard = memo(function VidCallCard({
           <span className="text-white text-xs font-semibold drop-shadow">Bagikan</span>
         </button>
 
-        <motion.button
-          className="flex flex-col items-center gap-1"
-          whileTap={{ scale: 0.92 }}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (session) {
-              onDisconnect();
-            } else {
-              onConnect();
-            }
-          }}
-        >
+        <motion.button className="flex flex-col items-center gap-1" whileTap={{ scale: 0.92 }}
+          onClick={(e) => { e.stopPropagation(); session ? onDisconnect() : onConnect(); }}>
           <div
             className="w-[46px] h-[46px] rounded-full flex items-center justify-center"
             style={{
@@ -537,15 +473,9 @@ const VidCallCard = memo(function VidCallCard({
               boxShadow: `0 0 18px ${session ? "#EE1D52" : "#22c55e"}66`,
             }}
           >
-            {session ? (
-              <PhoneOff size={20} color="white" />
-            ) : (
-              <Phone size={20} color="white" fill="white" />
-            )}
+            {session ? <PhoneOff size={20} color="white" /> : <Phone size={20} color="white" fill="white" />}
           </div>
-          <span className="text-white text-xs font-semibold drop-shadow">
-            {session ? "Keluar" : "Stream"}
-          </span>
+          <span className="text-white text-xs font-semibold drop-shadow">{session ? "Keluar" : "Stream"}</span>
         </motion.button>
       </div>
 
@@ -570,6 +500,8 @@ const VidCallCard = memo(function VidCallCard({
           <p className="text-white/70 text-xs drop-shadow">
             {isStreaming
               ? "🔴 Streaming live sekarang"
+              : session
+              ? "📡 Terhubung ke channel RTC"
               : user.busy
               ? "Sedang dalam panggilan"
               : "Siap dihubungi"}
@@ -582,6 +514,46 @@ const VidCallCard = memo(function VidCallCard({
 
 type PageStatus = "loading" | "ok" | "error";
 
+// SSE relay hook — listens to backend Vava WS relay for live Agora sessions
+function useVavaRelay(onSession: (s: AgoraSession) => void) {
+  const [wsStatus, setWsStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
+  const esRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    const es = new EventSource(`${BASE}/api/vava/ws-relay`);
+    esRef.current = es;
+    setWsStatus("connecting");
+
+    es.addEventListener("connected", () => setWsStatus("connecting"));
+    es.addEventListener("ws_connected", () => setWsStatus("connected"));
+    es.addEventListener("ws_disconnected", () => setWsStatus("connecting"));
+    es.addEventListener("ws_error", () => setWsStatus("error"));
+
+    es.addEventListener("agora_session", (e: MessageEvent) => {
+      try {
+        const d = JSON.parse(e.data) as {
+          appId: string; channel: string; token: string; uid: number; eventType?: string;
+        };
+        if (d.channel && d.token) {
+          onSession({
+            channel: d.channel,
+            token: d.token,
+            uid: d.uid,
+            peerId: null,
+            source: "ws",
+          });
+        }
+      } catch {}
+    });
+
+    es.onerror = () => setWsStatus("error");
+
+    return () => { es.close(); esRef.current = null; setWsStatus("idle"); };
+  }, [onSession]);
+
+  return wsStatus;
+}
+
 export default function FaVidCall() {
   const [activeTab, setActiveTab] = useState<"Nearby" | "All">("All");
   const [users, setUsers] = useState<VavaUser[]>([]);
@@ -590,7 +562,28 @@ export default function FaVidCall() {
   const [activeIndex, setActiveIndex] = useState(0);
   const [sessions, setSessions] = useState<Record<number, AgoraSession>>({});
   const [loadingSession, setLoadingSession] = useState<number | null>(null);
+  const [liveSession, setLiveSession] = useState<AgoraSession | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
+
+  // Handle incoming live Agora session from WS relay
+  const handleLiveSession = useCallback((s: AgoraSession) => {
+    setLiveSession(s);
+    // Auto-assign to the active card
+    setActiveIndex((ai) => {
+      setUsers((us) => {
+        if (us.length > 0 && ai < us.length) {
+          setSessions((prev) => ({
+            ...prev,
+            [us[ai].userId]: s,
+          }));
+        }
+        return us;
+      });
+      return ai;
+    });
+  }, []);
+
+  const wsStatus = useVavaRelay(handleLiveSession);
 
   const fetchUsers = useCallback(async () => {
     setStatus("loading");
@@ -610,10 +603,7 @@ export default function FaVidCall() {
     }
   }, []);
 
-  const displayedUsers = activeTab === "Nearby"
-    ? users.filter((u) => u.distance !== null)
-    : users;
-
+  const displayedUsers = activeTab === "Nearby" ? users.filter((u) => u.distance !== null) : users;
   const effectiveUsers = displayedUsers.length > 0 ? displayedUsers : users;
 
   const handleConnect = useCallback(async (userId: number) => {
@@ -630,21 +620,29 @@ export default function FaVidCall() {
             token: data.token,
             uid: data.uid,
             peerId: data.peerId,
+            orderNo: data.orderNo,
+            source: "api",
           },
         }));
       } else if (data.needsAuth) {
-        alert("Sesi login Vava telah berakhir. Perlu login ulang untuk streaming live.");
+        alert("Sesi login Vava berakhir. Perlu refresh kredensial.");
       } else if (data.waiting) {
-        alert("Tidak ada pengguna tersedia saat ini. Coba lagi dalam beberapa detik.");
+        // Try live session from WS relay if available
+        if (liveSession) {
+          setSessions((prev) => ({ ...prev, [userId]: liveSession }));
+        } else {
+          alert("Tidak ada pengguna tersedia saat ini. Coba lagi nanti.");
+        }
       } else {
         console.warn("Session response:", data);
+        if (liveSession) setSessions((prev) => ({ ...prev, [userId]: liveSession }));
       }
     } catch (err) {
       console.error("Session fetch failed:", err);
     } finally {
       setLoadingSession(null);
     }
-  }, []);
+  }, [liveSession]);
 
   const handleDisconnect = useCallback((userId: number) => {
     setSessions((prev) => {
@@ -700,26 +698,66 @@ export default function FaVidCall() {
           >
             Terdekat
           </button>
-          <button
-            onClick={() => setActiveTab("All")}
-            className="relative text-white"
-          >
+          <button onClick={() => setActiveTab("All")} className="relative text-white">
             Semua
             {activeTab === "All" && (
               <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-6 h-0.5 bg-white rounded-full" />
             )}
           </button>
         </div>
-        <div className="flex-1 flex justify-end">
+        <div className="flex-1 flex justify-end items-center gap-2 pointer-events-auto">
+          {/* WS relay status indicator */}
+          <span
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[10px] font-bold"
+            style={{
+              background: wsStatus === "connected"
+                ? "rgba(34,197,94,0.35)"
+                : wsStatus === "connecting"
+                ? "rgba(250,204,21,0.35)"
+                : "rgba(239,68,68,0.35)",
+              border: `1px solid ${wsStatus === "connected" ? "rgba(34,197,94,0.5)" : wsStatus === "connecting" ? "rgba(250,204,21,0.5)" : "rgba(239,68,68,0.5)"}`,
+            }}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${wsStatus === "connected" ? "bg-green-400 animate-pulse" : wsStatus === "connecting" ? "bg-yellow-400 animate-pulse" : "bg-red-400"}`} />
+            {wsStatus === "connected" ? "WS LIVE" : wsStatus === "connecting" ? "WS..." : "WS ERR"}
+          </span>
           <span
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[10px] font-bold"
             style={{ background: "rgba(238,29,82,0.35)", border: "1px solid rgba(238,29,82,0.5)" }}
           >
             <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-            VAVA LIVE
+            VAVA
           </span>
         </div>
       </div>
+
+      {/* Live session banner */}
+      {liveSession && (
+        <motion.div
+          className="absolute left-4 right-4 z-40 flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer"
+          style={{
+            top: "100px",
+            background: "rgba(34,197,94,0.2)",
+            border: "1px solid rgba(34,197,94,0.5)",
+            backdropFilter: "blur(8px)",
+          }}
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          onClick={() => {
+            if (effectiveUsers.length > 0) {
+              const userId = effectiveUsers[activeIndex]?.userId ?? effectiveUsers[0].userId;
+              setSessions((prev) => ({ ...prev, [userId]: liveSession! }));
+            }
+          }}
+        >
+          <Radio size={14} color="#22c55e" />
+          <div className="flex-1">
+            <p className="text-green-400 text-xs font-bold">🔴 Live Channel Tersedia!</p>
+            <p className="text-white/60 text-[10px] font-mono">ch: {liveSession.channel}</p>
+          </div>
+          <span className="text-green-400 text-[10px] font-bold">TAP JOIN</span>
+        </motion.div>
+      )}
 
       {/* Loading */}
       {status === "loading" && (
