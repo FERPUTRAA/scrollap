@@ -49,7 +49,7 @@ args = "PORT=20677 BASE_PATH=/ pnpm --filter @workspace/tiktok-ui run dev"
 waitForPort = 20677
 
 [agent]
-stack = "PNPM_WORKSPACE"
+stack = "BEST_EFFORT_FALLBACK"
 expertMode = true
 
 [postMerge]
