@@ -75,6 +75,7 @@
     "zod": "catalog:"
   },
   "dependencies": {
+    "agora-rtc-sdk-ng": "^4.24.3",
     "mpegts.js": "^1.8.0",
     "zego-express-engine-webrtc": "^3.12.0"
   }
