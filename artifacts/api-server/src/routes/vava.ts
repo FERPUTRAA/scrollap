@@ -14,8 +14,6 @@ const AGORA_APP_ID = "2f62afc1e7df4c71957bea05f56c8cbb";
 const APP_SECRET = "pp81FSAq4SNooD00gEE7DKwg";
 const PACKAGE_NAME = "com.vava.chat.web";
 
-// Account 13910632 - valid WS + visitor endpoints  
-// Account 13872374 - visitor reco works too
 let CREDS = {
   authToken: process.env.VAVA_AUTH_TOKEN ?? "bf34649655074f18a425669faf312c60",
   userId: process.env.VAVA_USER_ID ?? "13910632",
@@ -23,11 +21,11 @@ let CREDS = {
   nimToken: process.env.VAVA_NIM_TOKEN ?? "015311c51ec42a632508bb1ea93fba4b",
 };
 
-// Fallback credentials (account 13872374 - works for reco endpoints)
 const CREDS_FALLBACK = {
   authToken: "c2523245696c4610a13a049ca7278e05",
   userId: "13872374",
   deviceId: "2d4b9fd3-2382-4f78-8122-8d0becdd7177",
+  nimToken: "",
 };
 
 function flattenParams(obj: Record<string, unknown>, prefix = ""): Record<string, string> {
@@ -71,6 +69,7 @@ function buildHeaders(path: string, params: Record<string, unknown> = {}, cred =
     appPackageName: PACKAGE_NAME,
     channel: "vvh",
     applicationLanguage: "id",
+    userLanguage: "id-ID",
     deviceCategory: "0",
     operatingPlatform: "app",
     appVersion: "1.0.0",
@@ -78,10 +77,10 @@ function buildHeaders(path: string, params: Record<string, unknown> = {}, cred =
     requestTimestamp: ts,
     Accept: "application/json",
     "Content-Type": "application/json",
-    "User-Agent":
-      "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Stargon/6.3.2 Chrome/147.0.7727.111 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Stargon/6.3.2 Chrome/147.0.7727.111 Mobile Safari/537.36",
     Origin: "https://web.vava.chat",
     Referer: "https://web.vava.chat/",
+    "X-Requested-With": "net.onecook.browser",
   };
 }
 
@@ -108,27 +107,34 @@ async function vavaPost(path: string, body: Record<string, unknown>, cred = CRED
   try { return JSON.parse(text); } catch { throw new Error(`Bad JSON: ${text.slice(0, 200)}`); }
 }
 
-async function vavaWebPost(path: string, body: Record<string, unknown>, cred = CREDS): Promise<unknown> {
-  const fullPath = `/api/v1/${path}`;
-  const headers = buildHeaders(fullPath, body, cred);
-  const res = await undiciFetch(`${VAVA_WEB_BASE}/${path}`, {
-    method: "POST",
-    headers: {
-      ...headers,
-      Host: "web.vava.chat",
-      Origin: "https://web.vava.chat",
-      Referer: "https://web.vava.chat/",
-      userLanguage: "id-ID",
-      "X-Requested-With": "net.onecook.browser",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15_000),
-  });
-  const text = await res.text();
-  try { return JSON.parse(text); } catch { throw new Error(`Bad JSON: ${text.slice(0, 200)}`); }
+interface FreeUser {
+  userId: number;
+  displayName: string;
+  profilePicture: string;
+  ageValue?: number;
+  genderType?: number;
+  onlineFlag?: boolean;
+  busyStatusFlag?: boolean;
+  verified?: boolean;
+  ifShowVerified?: boolean;
+  callCostPerUnit?: number;
+  userLanguage?: string;
+  starSign?: string;
+  astrologicalIcon?: string;
+  withVideoPassFlag?: boolean;
+  hobbyTagList?: Array<{ tagId: number; tagIdentifier: string; mediaImageRef?: string }>;
+  languageTagList?: Array<{ tagId: number; tagIdentifier: string }>;
+  geoPosition?: {
+    regionCode?: string;
+    locationNameValue?: string;
+    whart?: string;
+    superableSprinkleproof?: string;
+  };
+  geographicalDistance?: string;
+  bioText?: string;
 }
 
-interface VavaUser {
+interface VisitorUser {
   userId: number;
   displayName: string;
   profilePicture: string;
@@ -146,7 +152,6 @@ interface VavaUser {
     superableSprinkleproof?: string;
   };
   geographicalDistance?: string;
-  transactionId?: string;
   bioText?: string;
   tags?: string[];
 }
@@ -165,10 +170,35 @@ interface NormalizedUser {
   countryFlagUrl: string;
   language: string;
   distance: string | null;
-  tags?: string[];
+  starSign: string | null;
+  astrologicalIconUrl: string | null;
+  hobbies: string[];
+  withVideoPass: boolean;
 }
 
-function normalizeUser(u: VavaUser): NormalizedUser {
+function normalizeFreeUser(u: FreeUser): NormalizedUser {
+  return {
+    userId: u.userId,
+    displayName: u.displayName || "Pengguna",
+    profilePictureUrl: u.profilePicture ? `${VAVA_CDN}/${u.profilePicture}` : "",
+    age: u.ageValue ?? null,
+    online: u.onlineFlag ?? true,
+    busy: u.busyStatusFlag ?? false,
+    verified: (u.verified ?? u.ifShowVerified) ?? false,
+    callCost: u.callCostPerUnit ?? 0,
+    country: u.geoPosition?.locationNameValue ?? "Indonesia",
+    countryCode: u.geoPosition?.regionCode ?? "ID",
+    countryFlagUrl: u.geoPosition?.whart ? `${VAVA_CDN}/${u.geoPosition.whart}` : "",
+    language: u.userLanguage ?? "id",
+    distance: u.geographicalDistance ?? null,
+    starSign: u.starSign ?? null,
+    astrologicalIconUrl: u.astrologicalIcon ? `${VAVA_CDN}/${u.astrologicalIcon}` : null,
+    hobbies: (u.hobbyTagList ?? []).map((h) => h.tagIdentifier).filter(Boolean),
+    withVideoPass: u.withVideoPassFlag ?? false,
+  };
+}
+
+function normalizeVisitorUser(u: VisitorUser): NormalizedUser {
   return {
     userId: u.userId,
     displayName: u.displayName || "Pengguna",
@@ -178,57 +208,76 @@ function normalizeUser(u: VavaUser): NormalizedUser {
     busy: u.busyStatusFlag ?? false,
     verified: u.verified ?? false,
     callCost: u.callCostPerUnit ?? 0,
-    country: u.geoPosition?.locationNameValue ?? "",
-    countryCode: u.geoPosition?.regionCode ?? "",
+    country: u.geoPosition?.locationNameValue ?? "Indonesia",
+    countryCode: u.geoPosition?.regionCode ?? "ID",
     countryFlagUrl: u.geoPosition?.whart ? `${VAVA_CDN}/${u.geoPosition.whart}` : "",
-    language: u.userLanguage ?? "",
+    language: u.userLanguage ?? "id",
     distance: u.geographicalDistance ?? null,
-    tags: u.tags ?? [],
+    starSign: null,
+    astrologicalIconUrl: null,
+    hobbies: u.tags ?? [],
+    withVideoPass: false,
   };
 }
 
-// GET /api/vava/users - fetch live online female users
+// GET /api/vava/users - fetch online Indonesian female users
 vavaRouter.get("/vava/users", async (_req: Request, res: Response) => {
   try {
     const limit = 30;
 
-    // Try multiple endpoints in parallel with both accounts
-    const [visitorResult, matchResult, visitorFallbackResult] = await Promise.allSettled([
-      vavaGet(`app/recommend/female/visitor?locationCode=ID&offset=0&limit=${limit}`, "", CREDS),
-      vavaGet(`app/matching/recommends/visitor?locationCode=ID&offset=0&limit=${limit}`, "", CREDS),
+    const [freeResult, visitorResult, visitorFallback] = await Promise.allSettled([
+      vavaGet(`client/recommend/female/free?locationCode=ID&offset=0&limit=${limit}`),
+      vavaGet(`app/recommend/female/visitor?locationCode=ID&offset=0&limit=${limit}`),
       vavaGet(`app/recommend/female/visitor?locationCode=ID&offset=0&limit=${limit}`, "", CREDS_FALLBACK),
     ]);
 
     const allUsers: NormalizedUser[] = [];
     const seen = new Set<number>();
 
-    function addUsers(result: PromiseSettledResult<unknown>) {
-      if (result.status !== "fulfilled") return;
-      const d = result.value as { data?: VavaUser[] | null; status?: number; failureResponse?: unknown };
-      if (d?.data && Array.isArray(d.data)) {
+    // Primary: free recommends (richest data)
+    if (freeResult.status === "fulfilled") {
+      const d = freeResult.value as { data?: FreeUser[] | null };
+      if (Array.isArray(d?.data)) {
         for (const u of d.data) {
+          if (u.userId && !seen.has(u.userId) && u.genderType !== 1) {
+            const regionCode = u.geoPosition?.regionCode ?? "";
+            const isIndonesia = regionCode === "ID" || regionCode === "" ||
+              (u.geoPosition?.locationNameValue ?? "").toLowerCase().includes("indonesia");
+            if (isIndonesia) {
+              allUsers.push(normalizeFreeUser(u));
+              seen.add(u.userId);
+            }
+          }
+        }
+      }
+    }
+
+    // Fallback: visitor recommends
+    for (const result of [visitorResult, visitorFallback]) {
+      if (result.status !== "fulfilled") continue;
+      const d = result.value as { data?: VisitorUser[] | null };
+      if (!Array.isArray(d?.data)) continue;
+      for (const u of d.data) {
+        if (u.userId && !seen.has(u.userId) && u.genderType !== 1) {
           const regionCode = u.geoPosition?.regionCode ?? "";
           const isIndonesia = regionCode === "ID" || regionCode === "" ||
             (u.geoPosition?.locationNameValue ?? "").toLowerCase().includes("indonesia");
-          if (u.userId && !seen.has(u.userId) && u.genderType !== 1 && isIndonesia) {
-            allUsers.push(normalizeUser(u));
+          if (isIndonesia) {
+            allUsers.push(normalizeVisitorUser(u));
             seen.add(u.userId);
           }
         }
       }
     }
 
-    addUsers(visitorResult);
-    addUsers(matchResult);
-    addUsers(visitorFallbackResult);
-
     if (allUsers.length === 0) {
       return res.json({ success: false, error: "Tidak ada pengguna online saat ini", users: [] });
     }
 
-    // Sort: online first, then by distance if available
+    // Sort: online first, then non-busy, then by distance
     allUsers.sort((a, b) => {
       if (a.online !== b.online) return a.online ? -1 : 1;
+      if (a.busy !== b.busy) return a.busy ? 1 : -1;
       if (a.distance && b.distance) {
         const da = parseFloat(a.distance);
         const db = parseFloat(b.distance);
@@ -244,6 +293,24 @@ vavaRouter.get("/vava/users", async (_req: Request, res: Response) => {
   }
 });
 
+// GET /api/vava/match-recommends - users shown during match search
+vavaRouter.get("/vava/match-recommends", async (_req: Request, res: Response) => {
+  try {
+    const result = await vavaGet("client/connection/recommends/ver");
+    const d = result as { data?: Array<{ profilePicture?: string; geographicalDistance?: string }> | null };
+    const users = (Array.isArray(d?.data) ? d.data : [])
+      .filter((u) => u.profilePicture)
+      .map((u) => ({
+        profilePictureUrl: `${VAVA_CDN}/${u.profilePicture}`,
+        distance: u.geographicalDistance ?? null,
+      }));
+    return res.json({ success: true, users });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(502).json({ success: false, error: msg, users: [] });
+  }
+});
+
 // POST /api/vava/session - attempt to get Agora session via matching
 vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
   try {
@@ -251,10 +318,9 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
     const rand = Math.random().toString(36).substring(2, 10);
     const matchingRoundIdentifier = `${ts}_${rand}`;
 
-    // Try both accounts in parallel for better match rate
     const [result1, result2] = await Promise.allSettled([
-      vavaWebPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS),
-      vavaWebPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS_FALLBACK),
+      vavaPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS),
+      vavaPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS_FALLBACK),
     ]);
 
     const result = (result1.status === "fulfilled" ? result1.value : result2.status === "fulfilled" ? result2.value : null) as {
@@ -262,14 +328,11 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
         channel?: string;
         authToken?: string;
         agoraToken?: string;
-        nimToken?: string;
         orderNo?: string;
-        userId?: number;
         peerId?: number;
         peerUserId?: number;
       };
       failureResponse?: { status: number; detailedDescription: string };
-      status?: number;
     };
 
     if (!result) {
@@ -280,13 +343,11 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
     if (failStatus === 521) {
       return res.status(401).json({ success: false, needsAuth: true, error: "Sesi login berakhir" });
     }
-    // 545 = no coins - no retry needed, wait for WS relay to provide session
     if (failStatus === 545) {
-      return res.status(202).json({ success: false, waiting: true, noCoins: true, error: "Gunakan jalur WS Live" });
+      return res.status(202).json({ success: false, waiting: true, noCoins: true, error: "Koin tidak mencukupi" });
     }
 
     const d = result?.data;
-    // authToken in match response = Agora RTC token, channel = Agora channel
     if (d?.channel && (d?.authToken || d?.agoraToken)) {
       return res.json({
         success: true,
@@ -349,6 +410,36 @@ vavaRouter.get("/vava/config", (_req: Request, res: Response) => {
   });
 });
 
+// Recursively search any object for Agora credentials
+function extractAgoraCredentials(obj: unknown): { channel: string; token: string } | null {
+  if (!obj || typeof obj !== "object") return null;
+  const o = obj as Record<string, unknown>;
+
+  // Direct fields
+  if (typeof o.channel === "string" && o.channel.length > 0) {
+    const token = (o.authToken ?? o.token ?? o.agoraToken ?? o.chatToken) as string | undefined;
+    if (typeof token === "string" && token.length > 0) {
+      return { channel: o.channel, token };
+    }
+  }
+
+  // Recurse into nested objects
+  for (const v of Object.values(o)) {
+    if (typeof v === "string") {
+      try {
+        const parsed = JSON.parse(v);
+        const found = extractAgoraCredentials(parsed);
+        if (found) return found;
+      } catch {}
+    } else if (typeof v === "object" && v !== null) {
+      const found = extractAgoraCredentials(v);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
 // GET /api/vava/ws-relay - SSE relay for Vava WebSocket events (live Agora channels)
 vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
   res.setHeader("Content-Type", "text/event-stream");
@@ -358,12 +449,13 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
   res.flushHeaders();
 
   const send = (event: string, data: unknown) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {}
   };
 
   send("connected", { status: "ok", timestamp: Date.now() });
 
-  // Connect to Vava WebSocket
   let wsSocket: import("net").Socket | null = null;
   let tlsSocket: import("tls").TLSSocket | null = null;
   let closed = false;
@@ -373,6 +465,8 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
     if (closed) return;
 
     const rawSock = createConnection(443, "vbi.vervachat.com");
+    wsSocket = rawSock;
+
     rawSock.on("connect", () => {
       if (closed) { rawSock.destroy(); return; }
       const tlsSock = tlsConnect({
@@ -402,7 +496,6 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
         ].join("\r\n");
 
         tlsSock.write(handshake);
-        send("ws_connecting", { uid: CREDS.userId });
 
         let headersDone = false;
 
@@ -418,7 +511,7 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
               buffer = buffer.slice(idx + 4);
               send("ws_connected", { uid: CREDS.userId });
             } else {
-              send("ws_error", { message: "WS handshake failed", header: headerStr.slice(0, 200) });
+              send("ws_error", { message: "Handshake failed", header: headerStr.slice(0, 100) });
               tlsSock.destroy();
               return;
             }
@@ -447,13 +540,19 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
             const totalLen = offset + maskLen + payloadLen;
             if (buffer.length < totalLen) break;
 
-            if (opcode === 8) { // close
+            if (opcode === 8) {
               tlsSock.destroy();
               buffer = Buffer.alloc(0);
               break;
             }
 
-            if (opcode === 1 || opcode === 2) { // text or binary
+            if (opcode === 9) {
+              // Ping -> send pong
+              const pongFrame = Buffer.from([0x8a, 0x00]);
+              if (tlsSock.writable) tlsSock.write(pongFrame);
+            }
+
+            if (opcode === 1 || opcode === 2) {
               let payload = buffer.slice(offset + maskLen, totalLen);
               if (masked) {
                 const mask = buffer.slice(offset, offset + 4);
@@ -461,44 +560,30 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
               }
               const text = payload.toString("utf8");
 
-              try {
-                const msg = JSON.parse(text) as { event_type?: string; textContent?: string };
-                const eventType = msg.event_type ?? "unknown";
+              // Forward raw message for debugging
+              if (text.includes("connected to server")) {
+                send("ws_connected", { message: text });
+              } else {
+                try {
+                  const msg = JSON.parse(text) as Record<string, unknown>;
+                  const eventType = (msg.event_type ?? msg.eventType ?? msg.type ?? "unknown") as string;
 
-                // Forward ALL events to frontend
-                send("ws_message", { eventType, raw: text.slice(0, 500) });
+                  send("ws_message", { eventType, raw: text.slice(0, 300) });
 
-                // Parse match events for Agora credentials
-                if (
-                  eventType === "MATCH_OUTCOME" ||
-                  eventType === "MATCHING_RESULT" ||
-                  eventType === "VIDEO_MATCH_REQUEST" ||
-                  eventType === "VIDEO_CALL_ESTABLISHED" ||
-                  eventType === "PRIORITY_HOST_MATCH_REQUEST"
-                ) {
-                  try {
-                    const content = typeof msg.textContent === "string"
-                      ? JSON.parse(msg.textContent)
-                      : msg.textContent;
-                    if (content && (content.channel || content.precaution?.channel)) {
-                      const channel = content.channel ?? content.precaution?.channel;
-                      const token = content.authToken ?? content.precaution?.authToken;
-                      if (channel && token) {
-                        send("agora_session", {
-                          appId: AGORA_APP_ID,
-                          channel,
-                          token,
-                          uid: parseInt(CREDS.userId, 10),
-                          eventType,
-                        });
-                      }
-                    }
-                  } catch {}
-                }
-              } catch {
-                // Non-JSON: "connected to server" etc.
-                if (text.includes("connected to server")) {
-                  send("ws_connected", { message: text });
+                  // Try to extract Agora credentials from anywhere in the message
+                  const creds = extractAgoraCredentials(msg);
+                  if (creds) {
+                    send("agora_session", {
+                      appId: AGORA_APP_ID,
+                      channel: creds.channel,
+                      token: creds.token,
+                      uid: parseInt(CREDS.userId, 10),
+                      eventType,
+                    });
+                  }
+                } catch {
+                  // Non-JSON message
+                  send("ws_raw", { text: text.slice(0, 200) });
                 }
               }
             }
@@ -507,15 +592,15 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
           }
         });
 
-        // Send ping every 25s
+        // Send WebSocket ping every 20s
         const pingInterval = setInterval(() => {
           if (closed || !tlsSock.writable) { clearInterval(pingInterval); return; }
-          // WebSocket ping frame
           tlsSock.write(Buffer.from([0x89, 0x00]));
-        }, 25_000);
+        }, 20_000);
 
         tlsSock.on("close", () => {
           clearInterval(pingInterval);
+          buffer = Buffer.alloc(0);
           if (!closed) {
             send("ws_disconnected", { message: "Reconnecting..." });
             setTimeout(connectWS, 3000);
@@ -539,8 +624,6 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
       send("ws_error", { message: e.message });
       if (!closed) setTimeout(connectWS, 5000);
     });
-
-    wsSocket = rawSock;
   }
 
   connectWS();
