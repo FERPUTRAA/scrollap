@@ -7,6 +7,7 @@ import { connect as tlsConnect } from "tls";
 const vavaRouter = Router();
 
 const VAVA_BASE = "https://vbi.vervachat.com/api/v1";
+const VAVA_WEB_BASE = "https://web.vava.chat/api/v1";
 const VAVA_CDN = "https://img.vervachat.com";
 const AGORA_APP_ID = "2f62afc1e7df4c71957bea05f56c8cbb";
 
@@ -107,6 +108,26 @@ async function vavaPost(path: string, body: Record<string, unknown>, cred = CRED
   try { return JSON.parse(text); } catch { throw new Error(`Bad JSON: ${text.slice(0, 200)}`); }
 }
 
+async function vavaWebPost(path: string, body: Record<string, unknown>, cred = CREDS): Promise<unknown> {
+  const fullPath = `/api/v1/${path}`;
+  const headers = buildHeaders(fullPath, body, cred);
+  const res = await undiciFetch(`${VAVA_WEB_BASE}/${path}`, {
+    method: "POST",
+    headers: {
+      ...headers,
+      Host: "web.vava.chat",
+      Origin: "https://web.vava.chat",
+      Referer: "https://web.vava.chat/",
+      userLanguage: "id-ID",
+      "X-Requested-With": "net.onecook.browser",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { throw new Error(`Bad JSON: ${text.slice(0, 200)}`); }
+}
+
 interface VavaUser {
   userId: number;
   displayName: string;
@@ -186,7 +207,10 @@ vavaRouter.get("/vava/users", async (_req: Request, res: Response) => {
       const d = result.value as { data?: VavaUser[] | null; status?: number; failureResponse?: unknown };
       if (d?.data && Array.isArray(d.data)) {
         for (const u of d.data) {
-          if (u.userId && !seen.has(u.userId) && u.genderType !== 1) {
+          const regionCode = u.geoPosition?.regionCode ?? "";
+          const isIndonesia = regionCode === "ID" || regionCode === "" ||
+            (u.geoPosition?.locationNameValue ?? "").toLowerCase().includes("indonesia");
+          if (u.userId && !seen.has(u.userId) && u.genderType !== 1 && isIndonesia) {
             allUsers.push(normalizeUser(u));
             seen.add(u.userId);
           }
@@ -227,10 +251,13 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
     const rand = Math.random().toString(36).substring(2, 10);
     const matchingRoundIdentifier = `${ts}_${rand}`;
 
-    const result = (await vavaPost("client/connection", {
-      appVersion: 1,
-      matchingRoundIdentifier,
-    })) as {
+    // Try both accounts in parallel for better match rate
+    const [result1, result2] = await Promise.allSettled([
+      vavaWebPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS),
+      vavaWebPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS_FALLBACK),
+    ]);
+
+    const result = (result1.status === "fulfilled" ? result1.value : result2.status === "fulfilled" ? result2.value : null) as {
       data?: {
         channel?: string;
         authToken?: string;
@@ -245,12 +272,17 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
       status?: number;
     };
 
-    if (result?.failureResponse?.status === 521) {
-      return res.status(401).json({
-        success: false,
-        needsAuth: true,
-        error: "Sesi login berakhir",
-      });
+    if (!result) {
+      return res.status(502).json({ success: false, error: "Semua koneksi gagal", waiting: true });
+    }
+
+    const failStatus = result?.failureResponse?.status;
+    if (failStatus === 521) {
+      return res.status(401).json({ success: false, needsAuth: true, error: "Sesi login berakhir" });
+    }
+    // 545 = no coins - no retry needed, wait for WS relay to provide session
+    if (failStatus === 545) {
+      return res.status(202).json({ success: false, waiting: true, noCoins: true, error: "Gunakan jalur WS Live" });
     }
 
     const d = result?.data;

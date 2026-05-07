@@ -82,6 +82,9 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
   const [remoteVideo, setRemoteVideo] = useState<IRemoteVideoTrack | null>(null);
   const [remoteAudio, setRemoteAudio] = useState<IRemoteAudioTrack | null>(null);
   const [muted, setMuted] = useState(false);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const pendingVideoRef = useRef<IRemoteVideoTrack | null>(null);
+  const pendingAudioRef = useRef<IRemoteAudioTrack | null>(null);
 
   const cleanup = useCallback(async () => {
     const c = clientRef.current;
@@ -95,19 +98,49 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
     setStreamState("idle");
     setRemoteVideo(null);
     setRemoteAudio(null);
+    setAutoplayBlocked(false);
   }, [remoteVideo, remoteAudio]);
+
+  // Handle autoplay unblock on user interaction
+  const unblockAutoplay = useCallback(() => {
+    if (!autoplayBlocked) return;
+    try {
+      pendingVideoRef.current?.play(undefined as unknown as HTMLElement);
+      pendingAudioRef.current?.play();
+    } catch {}
+    setAutoplayBlocked(false);
+    setMuted(false);
+  }, [autoplayBlocked]);
 
   useEffect(() => {
     if (!session || !videoEl) return;
     let cancelled = false;
 
+    async function playVideoTrack(track: IRemoteVideoTrack) {
+      try {
+        track.play(videoEl!);
+      } catch (e: unknown) {
+        const err = e as { name?: string };
+        if (err?.name === "NotAllowedError" || String(e).includes("autoplay")) {
+          pendingVideoRef.current = track;
+          setAutoplayBlocked(true);
+        }
+      }
+    }
+
     async function join() {
       if (!session || !videoEl) return;
       setStreamState("connecting");
+      setAutoplayBlocked(false);
 
       const client = AgoraRTC.createClient({ mode: "live", codec: "h264" });
       clientRef.current = client;
       await client.setClientRole("audience");
+
+      // Handle autoplay failed from Agora SDK
+      AgoraRTC.onAutoplayFailed = () => {
+        setAutoplayBlocked(true);
+      };
 
       client.on("user-published", async (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
         if (cancelled) return;
@@ -115,14 +148,17 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
         if (mediaType === "video") {
           const track = user.videoTrack;
           if (track && videoEl) {
-            track.play(videoEl);
+            await playVideoTrack(track);
             if (!cancelled) { setRemoteVideo(track); setStreamState("connected"); }
           }
         }
         if (mediaType === "audio") {
           const track = user.audioTrack;
           if (track) {
-            track.play();
+            try { track.play(); } catch {
+              pendingAudioRef.current = track;
+              setAutoplayBlocked(true);
+            }
             if (!cancelled) setRemoteAudio(track);
           }
         }
@@ -148,13 +184,15 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
               await client.subscribe(user, "video");
               const track = user.videoTrack;
               if (track && videoEl) {
-                track.play(videoEl);
+                await playVideoTrack(track);
                 if (!cancelled) { setRemoteVideo(track); setStreamState("connected"); }
               }
             }
             if (user.hasAudio) {
               await client.subscribe(user, "audio");
-              user.audioTrack?.play();
+              try { user.audioTrack?.play(); } catch {
+                if (user.audioTrack) { pendingAudioRef.current = user.audioTrack; setAutoplayBlocked(true); }
+              }
               if (!cancelled && user.audioTrack) setRemoteAudio(user.audioTrack);
             }
           }
@@ -182,7 +220,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
     }
   }, [remoteAudio, muted]);
 
-  return { streamState, remoteVideo, muted, toggleMute, cleanup };
+  return { streamState, remoteVideo, muted, toggleMute, cleanup, autoplayBlocked, unblockAutoplay };
 }
 
 interface CardProps {
@@ -205,7 +243,7 @@ const VidCallCard = memo(function VidCallCard({
   const [videoEl, setVideoEl] = useState<HTMLDivElement | null>(null);
 
   const activeSession = isActive ? session : null;
-  const { streamState, muted, toggleMute } = useAgoraViewer(activeSession, videoEl);
+  const { streamState, muted, toggleMute, autoplayBlocked, unblockAutoplay } = useAgoraViewer(activeSession, videoEl);
 
   useEffect(() => {
     if (videoContainerRef.current) setVideoEl(videoContainerRef.current);
@@ -345,6 +383,28 @@ const VidCallCard = memo(function VidCallCard({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Autoplay blocked - tap to play */}
+      {autoplayBlocked && isActive && (
+        <motion.div
+          className="absolute inset-0 flex items-center justify-center cursor-pointer"
+          style={{ zIndex: 35 }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          onClick={unblockAutoplay}
+        >
+          <div
+            className="flex flex-col items-center gap-3 px-6 py-4 rounded-2xl"
+            style={{ background: "rgba(0,0,0,0.65)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.15)" }}
+          >
+            <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ background: "rgba(238,29,82,0.9)" }}>
+              <Volume2 size={28} color="white" />
+            </div>
+            <p className="text-white font-bold text-sm">Tap untuk Mulai Play</p>
+            <p className="text-white/60 text-xs text-center">Browser memerlukan interaksi untuk memutar video</p>
+          </div>
+        </motion.div>
+      )}
 
       {/* No stream notice */}
       {streamState === "no_stream" && !isConnecting && isActive && (
@@ -564,6 +624,7 @@ export default function FaVidCall() {
   const [loadingSession, setLoadingSession] = useState<number | null>(null);
   const [liveSession, setLiveSession] = useState<AgoraSession | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
+  const retryCountRef = useRef<Record<number, number>>({});
 
   // Handle incoming live Agora session from WS relay
   const handleLiveSession = useCallback((s: AgoraSession) => {
@@ -603,8 +664,13 @@ export default function FaVidCall() {
     }
   }, []);
 
-  const displayedUsers = activeTab === "Nearby" ? users.filter((u) => u.distance !== null) : users;
-  const effectiveUsers = displayedUsers.length > 0 ? displayedUsers : users;
+  // Only show Indonesian users
+  const indonesianUsers = users.filter(
+    (u) => u.countryCode === "ID" || u.country.toLowerCase().includes("indonesia") || u.countryCode === ""
+  );
+  const baseUsers = indonesianUsers.length > 0 ? indonesianUsers : users;
+  const displayedUsers = activeTab === "Nearby" ? baseUsers.filter((u) => u.distance !== null) : baseUsers;
+  const effectiveUsers = displayedUsers.length > 0 ? displayedUsers : baseUsers;
 
   const handleConnect = useCallback(async (userId: number) => {
     setLoadingSession(userId);
@@ -625,16 +691,25 @@ export default function FaVidCall() {
           },
         }));
       } else if (data.needsAuth) {
-        alert("Sesi login Vava berakhir. Perlu refresh kredensial.");
+        console.warn("Auth needed, will rely on WS relay");
+      } else if (data.noCoins) {
+        // No coins - just wait for WS relay to provide a live session, no retry
+        if (liveSession) {
+          setSessions((prev) => ({ ...prev, [userId]: liveSession }));
+        }
+        // Else: WS relay will auto-assign when a live match comes in
       } else if (data.waiting) {
-        // Try live session from WS relay if available
+        // Try live session from WS relay if available, otherwise retry (max 3 times)
         if (liveSession) {
           setSessions((prev) => ({ ...prev, [userId]: liveSession }));
         } else {
-          alert("Tidak ada pengguna tersedia saat ini. Coba lagi nanti.");
+          const count = (retryCountRef.current[userId] ?? 0) + 1;
+          retryCountRef.current[userId] = count;
+          if (count <= 3) {
+            setTimeout(() => handleConnect(userId), 5000);
+          }
         }
       } else {
-        console.warn("Session response:", data);
         if (liveSession) setSessions((prev) => ({ ...prev, [userId]: liveSession }));
       }
     } catch (err) {
@@ -657,6 +732,30 @@ export default function FaVidCall() {
     const iv = setInterval(fetchUsers, 60_000);
     return () => clearInterval(iv);
   }, [fetchUsers]);
+
+  // Auto-connect to first active user after users load
+  const autoConnectedRef = useRef(false);
+  useEffect(() => {
+    if (status === "ok" && effectiveUsers.length > 0 && !autoConnectedRef.current) {
+      autoConnectedRef.current = true;
+      const firstUserId = effectiveUsers[0].userId;
+      if (!sessions[firstUserId]) {
+        handleConnect(firstUserId);
+      }
+    }
+  }, [status, effectiveUsers, sessions, handleConnect]);
+
+  // Auto-connect to active card when scrolling to a new card
+  const prevActiveRef = useRef(-1);
+  useEffect(() => {
+    if (prevActiveRef.current !== activeIndex && effectiveUsers.length > 0) {
+      prevActiveRef.current = activeIndex;
+      const userId = effectiveUsers[activeIndex]?.userId;
+      if (userId && !sessions[userId]) {
+        handleConnect(userId);
+      }
+    }
+  }, [activeIndex, effectiveUsers, sessions, handleConnect]);
 
   useEffect(() => {
     const feed = feedRef.current;
