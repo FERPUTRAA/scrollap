@@ -96,7 +96,7 @@ externalPort = 80
 
 [userenv.shared]
 HOT51_STREAM_KEY = "4ad75f5e2eb06d315ea14e8484a29e1d"
-HOT51_PROXY_URL = "socks5://103.76.149.140:1080"
+HOT51_PROXY_URL = "http://103.175.224.131:8080"
 
 [nix]
 packages = ["psmisc"]
