@@ -21,6 +21,7 @@ let CREDS = {
   deviceId: process.env.VAVA_DEVICE_ID ?? "2d4b9fd3-2382-4f78-8122-8d0becdd7177",
   nimToken: process.env.VAVA_NIM_TOKEN ?? "015311c51ec42a632508bb1ea93fba4b",
   valid: false,
+  genderType: 1 as number, // 1=female(host), 2=male(viewer). Primary account = female host
 };
 
 const CREDS_FALLBACK = {
@@ -29,6 +30,7 @@ const CREDS_FALLBACK = {
   deviceId: "2d4b9fd3-2382-4f78-8122-8d0becdd7177",
   nimToken: "015311c51ec42a632508bb1ea93fba4b",
   valid: false,
+  genderType: 2 as number,
 };
 
 let lastValidationTime = 0;
@@ -344,7 +346,12 @@ vavaRouter.post("/vava/google-login", async (req: Request, res: Response) => {
       CREDS.valid = true;
       if (d.nimToken) CREDS.nimToken = d.nimToken;
       lastValidationTime = 0;
-      return res.json({ success: true, userId: d.userId, authToken: d.authToken });
+      // Fetch account info to know gender
+      try {
+        const info = await vavaGet("client/account/info") as { data?: { genderType?: number } };
+        if (info?.data?.genderType) CREDS.genderType = info.data.genderType;
+      } catch {}
+      return res.json({ success: true, userId: d.userId, authToken: d.authToken, genderType: CREDS.genderType });
     }
 
     return res.json({ success: false, error: "Respons tidak valid dari VAVA", raw: loginData });
@@ -365,8 +372,8 @@ vavaRouter.post("/vava/google-register", async (req: Request, res: Response) => 
     const body = {
       tempToken,
       loginType: "GOOGLE",
-      nickname: nickname ?? `vava_${Date.now().toString().slice(-6)}`,
-      genderType: genderType ?? 1,
+      nickname: nickname ?? `user_${Date.now().toString().slice(-6)}`,
+      genderType: genderType ?? 2, // Default MALE (2) so new accounts can view female hosts
       birthday: birthday ?? 946684800000,
       avatar: "public/app/vvh_default_avatar.png",
     };
