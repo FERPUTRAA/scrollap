@@ -27,14 +27,35 @@ import {
   ChevronDown,
   Eye,
   Wifi,
+  LogIn,
+  RefreshCw,
+  Shield,
+  Video,
+  VideoOff,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 const AGORA_APP_ID = "2f62afc1e7df4c71957bea05f56c8cbb";
+const VAVA_GOOGLE_CLIENT_ID = "1060452493581-svne2ukq3vk3881on4d6k09sc3a16hg1.apps.googleusercontent.com";
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 const VAVA_CDN = "https://img.vervachat.com";
 
 AgoraRTC.setLogLevel(4);
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: { client_id: string; callback: (response: { credential: string }) => void; auto_select?: boolean }) => void;
+          prompt: (callback?: (notification: { isNotDisplayed: () => boolean; isSkippedMoment: () => boolean }) => void) => void;
+          renderButton: (element: HTMLElement, config: Record<string, unknown>) => void;
+          disableAutoSelect: () => void;
+        };
+      };
+    };
+  }
+}
 
 interface VavaUser {
   userId: number;
@@ -58,10 +79,10 @@ interface VavaUser {
 
 interface AgoraSession {
   channel: string;
-  token: string;
+  token: string | null;
   uid: number;
   peerId: number | null;
-  source?: "ws" | "api";
+  source?: "ws" | "api" | "live_table";
 }
 
 type StreamState = "idle" | "connecting" | "connected" | "no_stream" | "error";
@@ -77,12 +98,33 @@ const GRADIENTS = [
   "linear-gradient(160deg,#0d0d0d 0%,#1a1a1a 50%,#0d2137 100%)",
 ];
 
-// ─── Agora viewer hook ──────────────────────────────────────────────────────
+// ─── Google OAuth ─────────────────────────────────────────────────────────────
+function loadGoogleScript(): Promise<void> {
+  return new Promise((resolve) => {
+    if (window.google?.accounts?.id) { resolve(); return; }
+    if (document.getElementById("gsi-script")) {
+      const check = setInterval(() => {
+        if (window.google?.accounts?.id) { clearInterval(check); resolve(); }
+      }, 100);
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = "gsi-script";
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    document.head.appendChild(script);
+  });
+}
+
+// ─── Agora viewer hook ────────────────────────────────────────────────────────
 function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null) {
   const clientRef = useRef<IAgoraRTCClient | null>(null);
+  const remoteVideoRef = useRef<IRemoteVideoTrack | null>(null);
+  const remoteAudioRef = useRef<IRemoteAudioTrack | null>(null);
   const [streamState, setStreamState] = useState<StreamState>("idle");
   const [remoteVideo, setRemoteVideo] = useState<IRemoteVideoTrack | null>(null);
-  const [remoteAudio, setRemoteAudio] = useState<IRemoteAudioTrack | null>(null);
   const [muted, setMuted] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const pendingVideoRef = useRef<IRemoteVideoTrack | null>(null);
@@ -91,17 +133,14 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
   const cleanup = useCallback(async () => {
     const c = clientRef.current;
     if (!c) return;
-    try {
-      remoteVideo?.stop();
-      remoteAudio?.stop();
-      await c.leave();
-    } catch {}
+    try { remoteVideoRef.current?.stop(); remoteAudioRef.current?.stop(); await c.leave(); } catch {}
     clientRef.current = null;
+    remoteVideoRef.current = null;
+    remoteAudioRef.current = null;
     setStreamState("idle");
     setRemoteVideo(null);
-    setRemoteAudio(null);
     setAutoplayBlocked(false);
-  }, [remoteVideo, remoteAudio]);
+  }, []);
 
   const unblockAutoplay = useCallback(() => {
     if (!autoplayBlocked) return;
@@ -118,9 +157,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
     let cancelled = false;
 
     async function playVideoTrack(track: IRemoteVideoTrack) {
-      try {
-        track.play(videoEl!);
-      } catch (e: unknown) {
+      try { track.play(videoEl!); } catch (e: unknown) {
         const err = e as { name?: string };
         if (err?.name === "NotAllowedError" || String(e).includes("autoplay")) {
           pendingVideoRef.current = track;
@@ -147,30 +184,29 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
           const track = user.videoTrack;
           if (track && videoEl) {
             await playVideoTrack(track);
-            if (!cancelled) { setRemoteVideo(track); setStreamState("connected"); }
+            if (!cancelled) { remoteVideoRef.current = track; setRemoteVideo(track); setStreamState("connected"); }
           }
         }
         if (mediaType === "audio") {
           const track = user.audioTrack;
           if (track) {
-            try { track.play(); } catch {
-              pendingAudioRef.current = track;
-              setAutoplayBlocked(true);
-            }
-            if (!cancelled) setRemoteAudio(track);
+            try { track.play(); } catch { pendingAudioRef.current = track; setAutoplayBlocked(true); }
+            if (!cancelled) remoteAudioRef.current = track;
           }
         }
       });
 
       client.on("user-unpublished", (_user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
         if (mediaType === "video") { setRemoteVideo(null); setStreamState("no_stream"); }
-        if (mediaType === "audio") setRemoteAudio(null);
+        if (mediaType === "audio") remoteAudioRef.current = null;
       });
 
       client.on("user-left", () => { if (!cancelled) setStreamState("no_stream"); });
 
       try {
-        await client.join(AGORA_APP_ID, session.channel, session.token || null, 0);
+        // Try with token first, then null (in case token auth disabled for audience)
+        const tokenToUse = session.token && session.token.length > 5 ? session.token : null;
+        await client.join(AGORA_APP_ID, session.channel, tokenToUse, 0);
         if (cancelled) { await client.leave(); return; }
 
         const remoteUsers = client.remoteUsers;
@@ -183,7 +219,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
               const track = user.videoTrack;
               if (track && videoEl) {
                 await playVideoTrack(track);
-                if (!cancelled) { setRemoteVideo(track); setStreamState("connected"); }
+                if (!cancelled) { remoteVideoRef.current = track; setRemoteVideo(track); setStreamState("connected"); }
               }
             }
             if (user.hasAudio) {
@@ -191,15 +227,26 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
               try { user.audioTrack?.play(); } catch {
                 if (user.audioTrack) { pendingAudioRef.current = user.audioTrack; setAutoplayBlocked(true); }
               }
-              if (!cancelled && user.audioTrack) setRemoteAudio(user.audioTrack);
+              if (!cancelled && user.audioTrack) remoteAudioRef.current = user.audioTrack;
             }
           }
-          if (remoteUsers.length > 0 && !remoteUsers.some((u) => u.hasVideo)) {
-            setStreamState("no_stream");
-          }
+          if (remoteUsers.length > 0 && !remoteUsers.some((u) => u.hasVideo)) setStreamState("no_stream");
         }
-      } catch {
-        if (!cancelled) setStreamState("error");
+      } catch (e: unknown) {
+        if (cancelled) return;
+        // If token error, try without token
+        const msg = String(e);
+        if (msg.includes("token") || msg.includes("invalid") || msg.includes("INVALID")) {
+          try {
+            await client.leave();
+            await client.join(AGORA_APP_ID, session.channel, null, 0);
+            setStreamState("no_stream");
+          } catch {
+            setStreamState("error");
+          }
+        } else {
+          setStreamState("error");
+        }
       }
     }
 
@@ -208,41 +255,37 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
   }, [session, videoEl, cleanup]);
 
   const toggleMute = useCallback(() => {
-    if (remoteAudio) {
-      if (muted) remoteAudio.play();
-      else remoteAudio.stop();
+    const audio = remoteAudioRef.current;
+    if (audio) {
+      if (muted) audio.play();
+      else audio.stop();
       setMuted((m) => !m);
     }
-  }, [remoteAudio, muted]);
+  }, [muted]);
 
   return { streamState, remoteVideo, muted, toggleMute, cleanup, autoplayBlocked, unblockAutoplay };
 }
 
-// ─── WS / SSE relay hook (passive - no calling) ─────────────────────────────
+// ─── WS / SSE relay hook ──────────────────────────────────────────────────────
 function useVavaRelay(onSession: (s: AgoraSession) => void) {
   const [wsStatus, setWsStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
 
   useEffect(() => {
     const es = new EventSource(`${BASE}/api/vava/ws-relay`);
     setWsStatus("connecting");
-
     es.addEventListener("connected", () => setWsStatus("connecting"));
     es.addEventListener("ws_connecting", () => setWsStatus("connecting"));
     es.addEventListener("ws_connected", () => setWsStatus("connected"));
     es.addEventListener("ws_disconnected", () => setWsStatus("connecting"));
     es.addEventListener("ws_error", () => setWsStatus("error"));
-
     es.addEventListener("agora_session", (e: MessageEvent) => {
       try {
-        const d = JSON.parse(e.data) as {
-          appId: string; channel: string; token: string; uid: number;
-        };
+        const d = JSON.parse(e.data) as { appId: string; channel: string; token: string; uid: number };
         if (d.channel && d.token) {
           onSession({ channel: d.channel, token: d.token, uid: d.uid, peerId: null, source: "ws" });
         }
       } catch {}
     });
-
     es.onerror = () => setWsStatus("error");
     return () => { es.close(); setWsStatus("idle"); };
   }, [onSession]);
@@ -250,7 +293,204 @@ function useVavaRelay(onSession: (s: AgoraSession) => void) {
   return wsStatus;
 }
 
-// ─── Live card ───────────────────────────────────────────────────────────────
+// ─── Google Login Modal ───────────────────────────────────────────────────────
+interface GoogleLoginModalProps {
+  onSuccess: () => void;
+  onManualToken: (token: string, userId: string) => void;
+}
+
+const GoogleLoginModal = memo(function GoogleLoginModal({ onSuccess, onManualToken }: GoogleLoginModalProps) {
+  const btnRef = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [showManual, setShowManual] = useState(false);
+  const [manualToken, setManualToken] = useState("");
+  const [manualUserId, setManualUserId] = useState("");
+  const [gsiReady, setGsiReady] = useState(false);
+
+  useEffect(() => {
+    loadGoogleScript().then(() => {
+      if (!window.google?.accounts?.id) return;
+      window.google.accounts.id.initialize({
+        client_id: VAVA_GOOGLE_CLIENT_ID,
+        callback: async (response) => {
+          setLoading(true);
+          setError("");
+          try {
+            const res = await fetch(`${BASE}/api/vava/google-login`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ googleToken: response.credential }),
+            });
+            const data = await res.json() as { success: boolean; error?: string; needRegister?: boolean; tempToken?: string };
+            if (data.success) {
+              onSuccess();
+            } else if (data.needRegister && data.tempToken) {
+              // Auto-register
+              const regRes = await fetch(`${BASE}/api/vava/google-register`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tempToken: data.tempToken }),
+              });
+              const regData = await regRes.json() as { success: boolean; error?: string };
+              if (regData.success) { onSuccess(); }
+              else { setError(regData.error ?? "Registrasi gagal"); }
+            } else {
+              setError(data.error ?? "Login gagal");
+            }
+          } catch {
+            setError("Koneksi gagal, coba lagi");
+          } finally {
+            setLoading(false);
+          }
+        },
+      });
+      setGsiReady(true);
+    });
+  }, [onSuccess]);
+
+  useEffect(() => {
+    if (gsiReady && btnRef.current && window.google?.accounts?.id) {
+      window.google.accounts.id.renderButton(btnRef.current, {
+        theme: "filled_black",
+        size: "large",
+        width: 280,
+        text: "signin_with",
+        shape: "pill",
+        logo_alignment: "left",
+      });
+    }
+  }, [gsiReady]);
+
+  const handleManualSave = async () => {
+    if (!manualToken.trim()) { setError("Auth token tidak boleh kosong"); return; }
+    setLoading(true);
+    try {
+      const res = await fetch(`${BASE}/api/vava/credentials`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authToken: manualToken.trim(), userId: manualUserId.trim() || undefined }),
+      });
+      const data = await res.json() as { success: boolean };
+      if (data.success) onSuccess();
+      else setError("Gagal menyimpan credentials");
+    } catch {
+      setError("Koneksi gagal");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center px-6 z-50"
+      style={{ background: "linear-gradient(160deg,#0d0d1a 0%,#1a0030 50%,#0d1117 100%)" }}>
+
+      {/* Logo & title */}
+      <motion.div className="flex flex-col items-center mb-8"
+        initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
+        <div className="w-20 h-20 rounded-2xl flex items-center justify-center mb-4"
+          style={{ background: "linear-gradient(135deg, #EE1D52, #a855f7)", boxShadow: "0 0 40px rgba(238,29,82,0.5)" }}>
+          <Video size={40} color="white" />
+        </div>
+        <h1 className="text-white text-2xl font-bold mb-1">VAVA Live</h1>
+        <p className="text-white/50 text-sm text-center">Masuk untuk menonton siaran live video dari Indonesia</p>
+      </motion.div>
+
+      {/* Login options */}
+      <motion.div className="w-full max-w-xs flex flex-col gap-4"
+        initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: 0.2 }}>
+
+        {error && (
+          <div className="px-4 py-3 rounded-xl text-red-400 text-sm text-center"
+            style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.25)" }}>
+            {error}
+          </div>
+        )}
+
+        {loading && (
+          <div className="flex items-center justify-center gap-2 py-2">
+            <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
+            <span className="text-white/60 text-sm">Menghubungkan ke VAVA…</span>
+          </div>
+        )}
+
+        {!showManual ? (
+          <>
+            {/* Google Sign-In button */}
+            <div className="flex flex-col items-center gap-3">
+              <div ref={btnRef} className="flex justify-center" />
+              {!gsiReady && (
+                <button className="w-full py-3 rounded-full font-bold text-white flex items-center justify-center gap-2"
+                  style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)" }}
+                  disabled>
+                  <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+                  Memuat Google Sign-In…
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.1)" }} />
+              <span className="text-white/30 text-xs">atau</span>
+              <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.1)" }} />
+            </div>
+
+            <button onClick={() => setShowManual(true)}
+              className="w-full py-3 rounded-full font-semibold text-white/70 text-sm flex items-center justify-center gap-2"
+              style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)" }}>
+              <Shield size={15} />
+              Input Token VAVA Manual
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="flex flex-col gap-3">
+              <div className="text-white/60 text-xs text-center px-2">
+                Buka <span className="text-blue-400">web.vava.chat</span>, login Google, lalu F12 → Console → ketik:{" "}
+                <code className="text-yellow-400 text-[10px]">JSON.parse(localStorage.getItem("vb_pwa_session")).authToken</code>
+              </div>
+              <input
+                className="w-full px-4 py-3 rounded-xl text-white text-sm bg-transparent"
+                style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.2)", outline: "none" }}
+                placeholder="Auth Token dari VAVA"
+                value={manualToken}
+                onChange={(e) => setManualToken(e.target.value)}
+              />
+              <input
+                className="w-full px-4 py-3 rounded-xl text-white text-sm bg-transparent"
+                style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.2)", outline: "none" }}
+                placeholder="User ID (opsional)"
+                value={manualUserId}
+                onChange={(e) => setManualUserId(e.target.value)}
+              />
+              <button onClick={handleManualSave} disabled={loading}
+                className="w-full py-3 rounded-full font-bold text-white flex items-center justify-center gap-2"
+                style={{ background: loading ? "rgba(238,29,82,0.5)" : "#EE1D52" }}>
+                <LogIn size={16} />
+                Simpan & Masuk
+              </button>
+              <button onClick={() => setShowManual(false)}
+                className="text-white/40 text-xs text-center">
+                ← Kembali ke Google Login
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Info box */}
+        <div className="px-4 py-3 rounded-xl"
+          style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
+          <p className="text-white/40 text-[10px] text-center leading-relaxed">
+            Login menggunakan akun Google yang sama dengan VAVA app.<br />
+            Data tidak disimpan ke pihak ketiga.
+          </p>
+        </div>
+      </motion.div>
+    </div>
+  );
+});
+
+// ─── Live card ────────────────────────────────────────────────────────────────
 interface CardProps {
   user: VavaUser;
   index: number;
@@ -292,32 +532,22 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       onDoubleClick={handleDoubleTap}
     >
       {/* Background photo */}
-      <img
-        src={mainImg}
-        alt={user.displayName}
+      <img src={mainImg} alt={user.displayName}
         className="absolute inset-0 w-full h-full object-cover"
         style={{ opacity: isStreaming ? 0.07 : 0.55, transition: "opacity 0.6s ease" }}
-        onError={() => setImgError(true)}
-      />
+        onError={() => setImgError(true)} />
 
       {/* Agora live video container */}
-      <div
-        ref={videoContainerRef}
-        className="absolute inset-0 w-full h-full"
-        style={{ display: isStreaming ? "block" : "none", zIndex: 5 }}
-      />
+      <div ref={videoContainerRef} className="absolute inset-0 w-full h-full"
+        style={{ display: isStreaming ? "block" : "none", zIndex: 5 }} />
 
       {/* Gradient overlays */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background: isStreaming
-            ? "linear-gradient(to top, rgba(0,0,0,0.92) 0%, transparent 50%)"
-            : "rgba(0,0,0,0.28)",
-          zIndex: 6,
-          transition: "background 0.6s ease",
-        }}
-      />
+      <div className="absolute inset-0 pointer-events-none" style={{
+        background: isStreaming
+          ? "linear-gradient(to top, rgba(0,0,0,0.92) 0%, transparent 50%)"
+          : "rgba(0,0,0,0.28)",
+        zIndex: 6, transition: "background 0.6s ease",
+      }} />
       {!isStreaming && (
         <div className="absolute inset-0 pointer-events-none" style={{ backdropFilter: "blur(1px)", zIndex: 7 }} />
       )}
@@ -329,24 +559,16 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       {/* Double-tap heart */}
       <AnimatePresence>
         {showHeart && (
-          <motion.div
-            className="absolute inset-0 flex items-center justify-center pointer-events-none"
-            style={{ zIndex: 40 }}
-            initial={{ opacity: 0, scale: 0.5 }}
-            animate={{ opacity: 1, scale: 1.2 }}
-            exit={{ opacity: 0, scale: 1.5 }}
-            transition={{ duration: 0.4 }}
-          >
+          <motion.div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ zIndex: 40 }}
+            initial={{ opacity: 0, scale: 0.5 }} animate={{ opacity: 1, scale: 1.2 }} exit={{ opacity: 0, scale: 1.5 }} transition={{ duration: 0.4 }}>
             <Heart size={100} fill="#EE1D52" color="#EE1D52" />
           </motion.div>
         )}
       </AnimatePresence>
 
       {/* Top bar */}
-      <div
-        className="absolute top-0 left-0 right-0 flex items-center justify-between px-4 pt-12 pb-5 pointer-events-none"
-        style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.78) 0%, transparent 100%)", zIndex: 20 }}
-      >
+      <div className="absolute top-0 left-0 right-0 flex items-center justify-between px-4 pt-12 pb-5 pointer-events-none"
+        style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.78) 0%, transparent 100%)", zIndex: 20 }}>
         <div className="flex items-center gap-2">
           {isStreaming ? (
             <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-[11px] font-bold"
@@ -384,8 +606,7 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       {/* Connecting spinner */}
       <AnimatePresence>
         {isConnecting && (
-          <motion.div className="absolute inset-0 flex flex-col items-center justify-center gap-3"
-            style={{ zIndex: 25 }}
+          <motion.div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ zIndex: 25 }}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <div className="w-16 h-16 rounded-full border-4 border-white/20 border-t-white animate-spin" />
             <p className="text-white/80 text-sm font-medium">Bergabung ke siaran live…</p>
@@ -396,8 +617,7 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       {/* Autoplay unblock */}
       {autoplayBlocked && isActive && (
         <motion.div className="absolute inset-0 flex items-center justify-center cursor-pointer"
-          style={{ zIndex: 35 }} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-          onClick={unblockAutoplay}>
+          style={{ zIndex: 35 }} initial={{ opacity: 0 }} animate={{ opacity: 1 }} onClick={unblockAutoplay}>
           <div className="flex flex-col items-center gap-3 px-6 py-4 rounded-2xl"
             style={{ background: "rgba(0,0,0,0.65)", backdropFilter: "blur(10px)", border: "1px solid rgba(255,255,255,0.15)" }}>
             <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ background: "rgba(238,29,82,0.9)" }}>
@@ -412,8 +632,7 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       {/* Waiting for live notice */}
       {streamState === "no_stream" && !isConnecting && isActive && (
         <div className="absolute left-4 right-4 flex items-center gap-2 px-3 py-2 rounded-xl"
-          style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.55)",
-            border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(8px)", zIndex: 20 }}>
+          style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.55)", border: "1px solid rgba(255,255,255,0.1)", backdropFilter: "blur(8px)", zIndex: 20 }}>
           <Wifi size={14} color="rgba(255,255,255,0.6)" />
           <div>
             <p className="text-white/80 text-xs font-semibold">Bergabung ke channel</p>
@@ -425,9 +644,8 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       {/* Error notice */}
       {streamState === "error" && !isConnecting && isActive && (
         <div className="absolute left-4 right-4 flex items-center gap-2 px-3 py-2 rounded-xl"
-          style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(238,29,82,0.12)",
-            border: "1px solid rgba(238,29,82,0.25)", backdropFilter: "blur(8px)", zIndex: 20 }}>
-          <WifiOff size={14} color="#EE1D52" />
+          style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(238,29,82,0.12)", border: "1px solid rgba(238,29,82,0.25)", backdropFilter: "blur(8px)", zIndex: 20 }}>
+          <VideoOff size={14} color="#EE1D52" />
           <p className="text-white/70 text-xs">Tidak dapat bergabung ke siaran ini</p>
         </div>
       )}
@@ -435,16 +653,10 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       {/* Profile photo panel (offline state) */}
       {!isStreaming && !isConnecting && (
         <motion.div className="absolute rounded-3xl overflow-hidden"
-          style={{ top: "13%", left: "7%", right: "21%", height: "46%",
-            background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
-            backdropFilter: "blur(10px)", zIndex: 15 }}
-          initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.35 }}>
-          <img src={mainImg} alt={user.displayName}
-            className="absolute inset-0 w-full h-full object-cover object-top"
-            onError={() => setImgError(true)} />
-          <div className="absolute inset-0"
-            style={{ background: "linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 55%)" }} />
+          style={{ top: "13%", left: "7%", right: "21%", height: "46%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", backdropFilter: "blur(10px)", zIndex: 15 }}
+          initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.35 }}>
+          <img src={mainImg} alt={user.displayName} className="absolute inset-0 w-full h-full object-cover object-top" onError={() => setImgError(true)} />
+          <div className="absolute inset-0" style={{ background: "linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 55%)" }} />
           <div className="absolute bottom-3 left-3 right-3 flex items-end justify-between">
             <div className="flex items-center gap-1.5">
               <Eye size={11} color="white" />
@@ -462,9 +674,7 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
                 <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500" />
               </span>
-            ) : (
-              <span className="inline-flex h-3 w-3 rounded-full bg-gray-400" />
-            )}
+            ) : <span className="inline-flex h-3 w-3 rounded-full bg-gray-400" />}
           </div>
         </motion.div>
       )}
@@ -472,11 +682,9 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
       {/* Star sign badge */}
       {user.starSign && !isStreaming && !isConnecting && (
         <div className="absolute flex items-center gap-1 px-2 py-1 rounded-xl"
-          style={{ top: "13%", right: "4%", width: "16%", background: "rgba(0,0,0,0.5)",
-            border: "1px solid rgba(255,255,255,0.15)", backdropFilter: "blur(8px)", zIndex: 16 }}>
+          style={{ top: "13%", right: "4%", width: "16%", background: "rgba(0,0,0,0.5)", border: "1px solid rgba(255,255,255,0.15)", backdropFilter: "blur(8px)", zIndex: 16 }}>
           {user.astrologicalIconUrl && (
-            <img src={user.astrologicalIconUrl} alt={user.starSign}
-              className="w-5 h-5 object-contain"
+            <img src={user.astrologicalIconUrl} alt={user.starSign} className="w-5 h-5 object-contain"
               onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
           )}
           <span className="text-white/80 text-[9px] font-semibold leading-tight">{user.starSign}</span>
@@ -509,9 +717,7 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
         {isStreaming && (
           <motion.button className="flex flex-col items-center gap-1" whileTap={{ scale: 1.1 }}
             onClick={(e) => { e.stopPropagation(); toggleMute(); }}>
-            {muted
-              ? <VolumeX size={28} color="rgba(255,255,255,0.7)" strokeWidth={1.5} />
-              : <Volume2 size={28} color="white" strokeWidth={1.5} />}
+            {muted ? <VolumeX size={28} color="rgba(255,255,255,0.7)" strokeWidth={1.5} /> : <Volume2 size={28} color="white" strokeWidth={1.5} />}
             <span className="text-white text-xs font-semibold drop-shadow">{muted ? "Unmute" : "Mute"}</span>
           </motion.button>
         )}
@@ -529,39 +735,27 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
           {user.age && <span className="text-white/70 text-xs">{user.age} thn</span>}
           {user.verified && <CheckCircle size={13} color="#69C9D0" fill="#69C9D0" />}
         </div>
-
         <div className="flex items-center gap-2 flex-wrap mb-1">
           {user.country && (
-            <span className="flex items-center gap-1 text-white/80 text-xs">
-              <Globe size={10} />
-              {user.country}
-            </span>
+            <span className="flex items-center gap-1 text-white/80 text-xs"><Globe size={10} />{user.country}</span>
           )}
           {user.distance && <span className="text-white/60 text-xs">{user.distance}</span>}
         </div>
-
         {user.hobbies.length > 0 && (
           <div className="flex flex-wrap gap-1 mb-1">
             {user.hobbies.slice(0, 3).map((h) => (
               <span key={h} className="px-2 py-0.5 rounded-full text-white/80 text-[10px] font-medium"
-                style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)" }}>
-                {h}
-              </span>
+                style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.2)" }}>{h}</span>
             ))}
           </div>
         )}
-
         <div className="flex items-center gap-2">
           <Users size={11} color="rgba(255,255,255,0.7)" />
           <p className="text-white/70 text-xs drop-shadow">
-            {isStreaming
-              ? "🔴 Sedang live sekarang"
-              : session
-              ? "📡 Bergabung ke channel siaran"
-              : user.withVideoPass
-              ? "🎬 Tersedia di video pass"
-              : user.busy
-              ? "📹 Sedang siaran"
+            {isStreaming ? "🔴 Sedang live sekarang"
+              : session ? "📡 Bergabung ke channel siaran"
+              : user.withVideoPass ? "🎬 Tersedia di video pass"
+              : user.busy ? "📹 Sedang siaran"
               : "⏳ Menunggu siaran dimulai"}
           </p>
         </div>
@@ -570,8 +764,8 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
   );
 });
 
-// ─── Page ───────────────────────────────────────────────────────────────────
-type PageStatus = "loading" | "ok" | "error";
+// ─── Page ─────────────────────────────────────────────────────────────────────
+type PageStatus = "loading" | "ok" | "error" | "need_auth";
 
 export default function FaVidCall() {
   const [activeTab, setActiveTab] = useState<"Semua" | "Live">("Semua");
@@ -580,7 +774,18 @@ export default function FaVidCall() {
   const [errorMsg, setErrorMsg] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [sessions, setSessions] = useState<Record<number, AgoraSession>>({});
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
+
+  // Check auth status on mount
+  useEffect(() => {
+    fetch(`${BASE}/api/vava/status`)
+      .then((r) => r.json())
+      .then((d: { authenticated?: boolean }) => {
+        setIsAuthenticated(d.authenticated ?? false);
+      })
+      .catch(() => setIsAuthenticated(false));
+  }, []);
 
   // Passive WS relay: when a live session arrives, assign it to the active card
   const handleLiveSession = useCallback((s: AgoraSession) => {
@@ -596,6 +801,69 @@ export default function FaVidCall() {
   }, []);
 
   const wsStatus = useVavaRelay(handleLiveSession);
+
+  // Poll live sessions from VAVA live session table every 30s
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+
+    const pollLiveSessions = async () => {
+      try {
+        const res = await fetch(`${BASE}/api/vava/live-sessions`);
+        const data = await res.json() as {
+          success: boolean;
+          sessions: Array<{ channel: string; token: string | null; hostUserId: number | null }>;
+        };
+        if (data.success && data.sessions.length > 0) {
+          setUsers((us) => {
+            if (us.length === 0) return us;
+            const newSessions: Record<number, AgoraSession> = {};
+            data.sessions.forEach((s, i) => {
+              if (i < us.length) {
+                newSessions[us[i].userId] = {
+                  channel: s.channel, token: s.token, uid: 0, peerId: null, source: "live_table"
+                };
+              }
+            });
+            if (Object.keys(newSessions).length > 0) {
+              setSessions((prev) => ({ ...prev, ...newSessions }));
+            }
+            return us;
+          });
+        }
+      } catch {}
+    };
+
+    if (!cancelled) pollLiveSessions();
+    const interval = setInterval(() => { if (!cancelled) pollLiveSessions(); }, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [isAuthenticated]);
+
+  // Poll for matching sessions every 15s
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    let attempts = 0;
+
+    const tryMatch = async () => {
+      if (cancelled || attempts > 5) return;
+      attempts++;
+      try {
+        const res = await fetch(`${BASE}/api/vava/session`, { method: "POST" });
+        const data = await res.json() as {
+          success: boolean; channel?: string; token?: string; uid?: number; peerId?: number | null; waiting?: boolean; noCoins?: boolean;
+        };
+        if (data.success && data.channel) {
+          handleLiveSession({ channel: data.channel, token: data.token ?? null, uid: data.uid ?? 0, peerId: data.peerId ?? null, source: "api" });
+          attempts = 0;
+        }
+      } catch {}
+    };
+
+    const interval = setInterval(() => { if (!cancelled) tryMatch(); }, 15_000);
+    setTimeout(() => { if (!cancelled) tryMatch(); }, 2000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [isAuthenticated, handleLiveSession]);
 
   const fetchUsers = useCallback(async () => {
     setStatus("loading");
@@ -616,6 +884,24 @@ export default function FaVidCall() {
   }, []);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
+
+  const handleLoginSuccess = useCallback(() => {
+    setIsAuthenticated(true);
+    // Re-validate after login
+    fetch(`${BASE}/api/vava/status`)
+      .then((r) => r.json())
+      .then((d: { authenticated?: boolean }) => setIsAuthenticated(d.authenticated ?? true))
+      .catch(() => setIsAuthenticated(true));
+  }, []);
+
+  const handleManualToken = useCallback(async (token: string, userId: string) => {
+    await fetch(`${BASE}/api/vava/credentials`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ authToken: token, userId: userId || undefined }),
+    });
+    setIsAuthenticated(true);
+  }, []);
 
   const indonesianUsers = users.filter(
     (u) => u.countryCode === "ID" || u.country.toLowerCase().includes("indonesia") || u.countryCode === ""
@@ -640,7 +926,8 @@ export default function FaVidCall() {
     if (idx !== activeIndex) setActiveIndex(idx);
   }, [activeIndex]);
 
-  if (status === "loading") {
+  // Loading state
+  if (status === "loading" || isAuthenticated === null) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4" style={{ background: "#0d1117" }}>
         <div className="w-12 h-12 rounded-full border-4 border-white/20 border-t-[#EE1D52] animate-spin" />
@@ -649,14 +936,16 @@ export default function FaVidCall() {
     );
   }
 
+  // Error state
   if (status === "error") {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-5 px-8" style={{ background: "#0d1117" }}>
         <WifiOff size={48} color="rgba(255,255,255,0.3)" />
         <p className="text-white/80 text-base font-semibold text-center">{errorMsg}</p>
         <button onClick={fetchUsers}
-          className="px-6 py-2.5 rounded-full text-white font-bold text-sm"
+          className="px-6 py-2.5 rounded-full text-white font-bold text-sm flex items-center gap-2"
           style={{ background: "#EE1D52" }}>
+          <RefreshCw size={14} />
           Coba Lagi
         </button>
       </div>
@@ -665,6 +954,17 @@ export default function FaVidCall() {
 
   return (
     <div className="relative w-full h-full flex flex-col" style={{ background: "#0d1117" }}>
+
+      {/* Google Login overlay (shown when not authenticated) */}
+      <AnimatePresence>
+        {!isAuthenticated && (
+          <motion.div className="absolute inset-0 z-[100]"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <GoogleLoginModal onSuccess={handleLoginSuccess} onManualToken={handleManualToken} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Tab bar */}
       <div className="absolute top-0 left-0 right-0 z-50 flex items-center justify-center gap-1 pt-14 pb-3 pointer-events-none"
         style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, transparent 100%)" }}>
@@ -673,15 +973,22 @@ export default function FaVidCall() {
           {(["Semua", "Live"] as const).map((tab) => (
             <button key={tab}
               className="px-4 py-1.5 rounded-2xl text-xs font-bold transition-all"
-              style={{
-                background: activeTab === tab ? "rgba(238,29,82,0.9)" : "transparent",
-                color: "white",
-              }}
+              style={{ background: activeTab === tab ? "rgba(238,29,82,0.9)" : "transparent", color: "white" }}
               onClick={() => { setActiveTab(tab); setActiveIndex(0); scrollToIndex(0); }}>
               {tab === "Live" ? "🔴 Sedang Live" : tab}
             </button>
           ))}
         </div>
+
+        {/* Auth indicator */}
+        {isAuthenticated && (
+          <div className="absolute right-3 top-14 flex items-center gap-1 px-2 py-1 rounded-full pointer-events-auto cursor-pointer"
+            style={{ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.3)" }}
+            onClick={() => setIsAuthenticated(false)}>
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-green-400 text-[9px] font-bold">VAVA</span>
+          </div>
+        )}
       </div>
 
       {/* Nav arrows */}
@@ -708,37 +1015,25 @@ export default function FaVidCall() {
       </div>
 
       {/* Feed */}
-      <div
-        ref={feedRef}
+      <div ref={feedRef}
         className="flex-1 overflow-y-scroll"
         style={{ scrollSnapType: "y mandatory", scrollbarWidth: "none" }}
-        onScroll={handleScroll}
-      >
+        onScroll={handleScroll}>
         <style>{`.feed-scroll::-webkit-scrollbar{display:none}`}</style>
         {effectiveUsers.map((user, i) => {
           const session = sessions[user.userId] ?? null;
           return (
-            <div key={user.userId}
-              className="relative w-full"
+            <div key={user.userId} className="relative w-full"
               style={{ height: "100svh", scrollSnapAlign: "start", scrollSnapStop: "always" }}>
-              <LiveCard
-                user={user}
-                index={i}
-                isActive={i === activeIndex}
-                session={session}
-                wsStatus={wsStatus}
-              />
-
+              <LiveCard user={user} index={i} isActive={i === activeIndex} session={session} wsStatus={wsStatus} />
               {/* Dot indicator */}
               <div className="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-20"
                 style={{ display: effectiveUsers.length <= 10 ? "flex" : "none" }}>
                 {effectiveUsers.slice(Math.max(0, i - 2), Math.min(effectiveUsers.length, i + 3)).map((_, di) => {
                   const realIdx = Math.max(0, i - 2) + di;
                   return (
-                    <div key={realIdx}
-                      className="w-1 rounded-full transition-all"
-                      style={{ height: realIdx === activeIndex ? 20 : 6,
-                        background: realIdx === activeIndex ? "white" : "rgba(255,255,255,0.3)" }} />
+                    <div key={realIdx} className="w-1 rounded-full transition-all"
+                      style={{ height: realIdx === activeIndex ? 20 : 6, background: realIdx === activeIndex ? "white" : "rgba(255,255,255,0.3)" }} />
                   );
                 })}
               </div>
@@ -747,7 +1042,7 @@ export default function FaVidCall() {
         })}
       </div>
 
-      {/* Bottom nav hint */}
+      {/* Bottom hint */}
       <div className="absolute bottom-0 left-0 right-0 z-40 flex items-center justify-center pb-6 pt-3 pointer-events-none"
         style={{ background: "linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 100%)" }}>
         <p className="text-white/40 text-[10px] font-medium">Geser untuk melihat lebih banyak siaran</p>
