@@ -36,26 +36,11 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 
 const AGORA_APP_ID = "2f62afc1e7df4c71957bea05f56c8cbb";
-const VAVA_GOOGLE_CLIENT_ID = "1060452493581-svne2ukq3vk3881on4d6k09sc3a16hg1.apps.googleusercontent.com";
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 const VAVA_CDN = "https://img.vervachat.com";
 
 AgoraRTC.setLogLevel(4);
 
-declare global {
-  interface Window {
-    google?: {
-      accounts: {
-        id: {
-          initialize: (config: { client_id: string; callback: (response: { credential: string }) => void; auto_select?: boolean }) => void;
-          prompt: (callback?: (notification: { isNotDisplayed: () => boolean; isSkippedMoment: () => boolean }) => void) => void;
-          renderButton: (element: HTMLElement, config: Record<string, unknown>) => void;
-          disableAutoSelect: () => void;
-        };
-      };
-    };
-  }
-}
 
 interface VavaUser {
   userId: number;
@@ -97,26 +82,6 @@ const GRADIENTS = [
   "linear-gradient(160deg,#200122 0%,#6f0000 50%,#200122 100%)",
   "linear-gradient(160deg,#0d0d0d 0%,#1a1a1a 50%,#0d2137 100%)",
 ];
-
-// ─── Google OAuth ─────────────────────────────────────────────────────────────
-function loadGoogleScript(): Promise<void> {
-  return new Promise((resolve) => {
-    if (window.google?.accounts?.id) { resolve(); return; }
-    if (document.getElementById("gsi-script")) {
-      const check = setInterval(() => {
-        if (window.google?.accounts?.id) { clearInterval(check); resolve(); }
-      }, 100);
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = "gsi-script";
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.defer = true;
-    script.onload = () => resolve();
-    document.head.appendChild(script);
-  });
-}
 
 // ─── Agora viewer hook ────────────────────────────────────────────────────────
 function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null) {
@@ -293,78 +258,30 @@ function useVavaRelay(onSession: (s: AgoraSession) => void) {
   return wsStatus;
 }
 
-// ─── Google Login Modal ───────────────────────────────────────────────────────
+// ─── Login Modal ─────────────────────────────────────────────────────────────
 interface GoogleLoginModalProps {
   onSuccess: () => void;
   onManualToken: (token: string, userId: string) => void;
 }
 
-const GoogleLoginModal = memo(function GoogleLoginModal({ onSuccess, onManualToken }: GoogleLoginModalProps) {
-  const btnRef = useRef<HTMLDivElement>(null);
+const CONSOLE_CMD = `JSON.parse(localStorage.getItem("vb_pwa_session")).authToken`;
+
+const GoogleLoginModal = memo(function GoogleLoginModal({ onSuccess }: GoogleLoginModalProps) {
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [showManual, setShowManual] = useState(false);
   const [manualToken, setManualToken] = useState("");
   const [manualUserId, setManualUserId] = useState("");
-  const [gsiReady, setGsiReady] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
-    loadGoogleScript().then(() => {
-      if (!window.google?.accounts?.id) return;
-      window.google.accounts.id.initialize({
-        client_id: VAVA_GOOGLE_CLIENT_ID,
-        callback: async (response) => {
-          setLoading(true);
-          setError("");
-          try {
-            const res = await fetch(`${BASE}/api/vava/google-login`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ googleToken: response.credential }),
-            });
-            const data = await res.json() as { success: boolean; error?: string; needRegister?: boolean; tempToken?: string };
-            if (data.success) {
-              onSuccess();
-            } else if (data.needRegister && data.tempToken) {
-              // Auto-register
-              const regRes = await fetch(`${BASE}/api/vava/google-register`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tempToken: data.tempToken }),
-              });
-              const regData = await regRes.json() as { success: boolean; error?: string };
-              if (regData.success) { onSuccess(); }
-              else { setError(regData.error ?? "Registrasi gagal"); }
-            } else {
-              setError(data.error ?? "Login gagal");
-            }
-          } catch {
-            setError("Koneksi gagal, coba lagi");
-          } finally {
-            setLoading(false);
-          }
-        },
-      });
-      setGsiReady(true);
-    });
-  }, [onSuccess]);
+  const copyCmd = () => {
+    navigator.clipboard.writeText(CONSOLE_CMD).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+  };
 
-  useEffect(() => {
-    if (gsiReady && btnRef.current && window.google?.accounts?.id) {
-      window.google.accounts.id.renderButton(btnRef.current, {
-        theme: "filled_black",
-        size: "large",
-        width: 280,
-        text: "signin_with",
-        shape: "pill",
-        logo_alignment: "left",
-      });
-    }
-  }, [gsiReady]);
-
-  const handleManualSave = async () => {
-    if (!manualToken.trim()) { setError("Auth token tidak boleh kosong"); return; }
+  const handleSave = async () => {
+    if (!manualToken.trim()) { setError("Token tidak boleh kosong"); return; }
     setLoading(true);
+    setError("");
     try {
       const res = await fetch(`${BASE}/api/vava/credentials`, {
         method: "POST",
@@ -373,7 +290,7 @@ const GoogleLoginModal = memo(function GoogleLoginModal({ onSuccess, onManualTok
       });
       const data = await res.json() as { success: boolean };
       if (data.success) onSuccess();
-      else setError("Gagal menyimpan credentials");
+      else setError("Token tidak valid, coba lagi");
     } catch {
       setError("Koneksi gagal");
     } finally {
@@ -382,110 +299,167 @@ const GoogleLoginModal = memo(function GoogleLoginModal({ onSuccess, onManualTok
   };
 
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center px-6 z-50"
-      style={{ background: "linear-gradient(160deg,#0d0d1a 0%,#1a0030 50%,#0d1117 100%)" }}>
+    <div className="absolute inset-0 flex flex-col z-50 overflow-y-auto"
+      style={{ background: "linear-gradient(160deg,#0d0d1a 0%,#160028 50%,#0d1117 100%)" }}>
 
-      {/* Logo & title */}
-      <motion.div className="flex flex-col items-center mb-8"
-        initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
-        <div className="w-20 h-20 rounded-2xl flex items-center justify-center mb-4"
-          style={{ background: "linear-gradient(135deg, #EE1D52, #a855f7)", boxShadow: "0 0 40px rgba(238,29,82,0.5)" }}>
-          <Video size={40} color="white" />
+      <div className="flex flex-col items-center px-5 pt-12 pb-8 min-h-full">
+
+        {/* Header */}
+        <motion.div className="flex flex-col items-center mb-6"
+          initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mb-3"
+            style={{ background: "linear-gradient(135deg,#EE1D52,#a855f7)", boxShadow: "0 0 30px rgba(238,29,82,0.45)" }}>
+            <Video size={32} color="white" />
+          </div>
+          <h1 className="text-white text-xl font-bold mb-0.5">Hubungkan VAVA</h1>
+          <p className="text-white/40 text-xs text-center">Ikuti 3 langkah di bawah ini</p>
+        </motion.div>
+
+        {/* Step indicator */}
+        <div className="flex items-center gap-2 mb-6">
+          {([1, 2, 3] as const).map((s) => (
+            <React.Fragment key={s}>
+              <button onClick={() => s < step ? setStep(s) : undefined}
+                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all"
+                style={{
+                  background: step >= s ? "#EE1D52" : "rgba(255,255,255,0.08)",
+                  color: "white",
+                  border: step === s ? "2px solid rgba(255,255,255,0.4)" : "2px solid transparent",
+                }}>
+                {s}
+              </button>
+              {s < 3 && <div className="h-px w-8" style={{ background: step > s ? "#EE1D52" : "rgba(255,255,255,0.12)" }} />}
+            </React.Fragment>
+          ))}
         </div>
-        <h1 className="text-white text-2xl font-bold mb-1">VAVA Live</h1>
-        <p className="text-white/50 text-sm text-center">Masuk untuk menonton siaran live video dari Indonesia</p>
-      </motion.div>
 
-      {/* Login options */}
-      <motion.div className="w-full max-w-xs flex flex-col gap-4"
-        initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: 0.2 }}>
+        <motion.div className="w-full max-w-xs flex flex-col gap-3"
+          key={step} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.3 }}>
 
-        {error && (
-          <div className="px-4 py-3 rounded-xl text-red-400 text-sm text-center"
-            style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.25)" }}>
-            {error}
-          </div>
-        )}
-
-        {loading && (
-          <div className="flex items-center justify-center gap-2 py-2">
-            <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white animate-spin" />
-            <span className="text-white/60 text-sm">Menghubungkan ke VAVA…</span>
-          </div>
-        )}
-
-        {!showManual ? (
-          <>
-            {/* Google Sign-In button */}
-            <div className="flex flex-col items-center gap-3">
-              <div ref={btnRef} className="flex justify-center" />
-              {!gsiReady && (
-                <button className="w-full py-3 rounded-full font-bold text-white flex items-center justify-center gap-2"
-                  style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)" }}
-                  disabled>
-                  <div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                  Memuat Google Sign-In…
-                </button>
-              )}
-            </div>
-
-            <div className="flex items-center gap-3">
-              <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.1)" }} />
-              <span className="text-white/30 text-xs">atau</span>
-              <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.1)" }} />
-            </div>
-
-            <button onClick={() => setShowManual(true)}
-              className="w-full py-3 rounded-full font-semibold text-white/70 text-sm flex items-center justify-center gap-2"
-              style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)" }}>
-              <Shield size={15} />
-              Input Token VAVA Manual
-            </button>
-          </>
-        ) : (
-          <>
-            <div className="flex flex-col gap-3">
-              <div className="text-white/60 text-xs text-center px-2">
-                Buka <span className="text-blue-400">web.vava.chat</span>, login Google, lalu F12 → Console → ketik:{" "}
-                <code className="text-yellow-400 text-[10px]">JSON.parse(localStorage.getItem("vb_pwa_session")).authToken</code>
+          {/* STEP 1 */}
+          {step === 1 && (
+            <>
+              <div className="rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                <p className="text-white font-semibold text-sm mb-2">Langkah 1 — Buka VAVA di browser</p>
+                <p className="text-white/50 text-xs leading-relaxed mb-3">
+                  Kamu perlu login ke situs VAVA menggunakan akun <span className="text-yellow-400 font-medium">PRIA</span> agar bisa menonton host perempuan.
+                </p>
+                <a href="https://web.vava.chat" target="_blank" rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 w-full py-3 rounded-xl font-bold text-white text-sm"
+                  style={{ background: "linear-gradient(135deg,#EE1D52,#c026d3)" }}>
+                  <Globe size={15} />
+                  Buka web.vava.chat
+                </a>
+                <p className="text-white/30 text-[10px] text-center mt-2">Login pakai Google → pilih <span className="text-white/50">Laki-laki</span> saat registrasi</p>
               </div>
-              <input
-                className="w-full px-4 py-3 rounded-xl text-white text-sm bg-transparent"
-                style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.2)", outline: "none" }}
-                placeholder="Auth Token dari VAVA"
-                value={manualToken}
-                onChange={(e) => setManualToken(e.target.value)}
-              />
-              <input
-                className="w-full px-4 py-3 rounded-xl text-white text-sm bg-transparent"
-                style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.2)", outline: "none" }}
-                placeholder="User ID (opsional)"
-                value={manualUserId}
-                onChange={(e) => setManualUserId(e.target.value)}
-              />
-              <button onClick={handleManualSave} disabled={loading}
-                className="w-full py-3 rounded-full font-bold text-white flex items-center justify-center gap-2"
-                style={{ background: loading ? "rgba(238,29,82,0.5)" : "#EE1D52" }}>
-                <LogIn size={16} />
-                Simpan & Masuk
+              <button onClick={() => setStep(2)}
+                className="w-full py-3 rounded-xl font-bold text-white text-sm"
+                style={{ background: "rgba(238,29,82,0.15)", border: "1px solid rgba(238,29,82,0.3)" }}>
+                Sudah login → Lanjut ke Langkah 2
               </button>
-              <button onClick={() => setShowManual(false)}
-                className="text-white/40 text-xs text-center">
-                ← Kembali ke Google Login
-              </button>
-            </div>
-          </>
-        )}
+            </>
+          )}
 
-        {/* Info box */}
-        <div className="px-4 py-3 rounded-xl"
-          style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
-          <p className="text-white/40 text-[10px] text-center leading-relaxed">
-            Login menggunakan akun Google yang sama dengan VAVA app.<br />
-            Data tidak disimpan ke pihak ketiga.
+          {/* STEP 2 */}
+          {step === 2 && (
+            <>
+              <div className="rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                <p className="text-white font-semibold text-sm mb-2">Langkah 2 — Ambil token di Console</p>
+                <div className="flex flex-col gap-2 mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0"
+                      style={{ background: "rgba(238,29,82,0.3)", color: "#EE1D52" }}>1</span>
+                    <p className="text-white/60 text-xs">Tekan <kbd className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: "rgba(255,255,255,0.1)" }}>F12</kbd> → pilih tab <strong className="text-white/80">Console</strong></p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0"
+                      style={{ background: "rgba(238,29,82,0.3)", color: "#EE1D52" }}>2</span>
+                    <p className="text-white/60 text-xs">Tempel perintah di bawah, lalu tekan <kbd className="px-1.5 py-0.5 rounded text-[10px]" style={{ background: "rgba(255,255,255,0.1)" }}>Enter</kbd></p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0"
+                      style={{ background: "rgba(238,29,82,0.3)", color: "#EE1D52" }}>3</span>
+                    <p className="text-white/60 text-xs">Salin hasilnya (string panjang)</p>
+                  </div>
+                </div>
+                <div className="rounded-xl p-3 flex items-start gap-2" style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                  <code className="text-yellow-400 text-[10px] break-all flex-1 leading-relaxed">{CONSOLE_CMD}</code>
+                  <button onClick={copyCmd} className="flex-shrink-0 px-2 py-1 rounded-lg text-[10px] font-bold transition-all"
+                    style={{ background: copied ? "rgba(34,197,94,0.3)" : "rgba(255,255,255,0.1)", color: copied ? "#4ade80" : "white" }}>
+                    {copied ? "✓" : "Salin"}
+                  </button>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => setStep(1)}
+                  className="flex-1 py-3 rounded-xl font-semibold text-white/50 text-sm"
+                  style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                  ← Kembali
+                </button>
+                <button onClick={() => setStep(3)}
+                  className="flex-[2] py-3 rounded-xl font-bold text-white text-sm"
+                  style={{ background: "rgba(238,29,82,0.15)", border: "1px solid rgba(238,29,82,0.3)" }}>
+                  Sudah salin → Lanjut
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* STEP 3 */}
+          {step === 3 && (
+            <>
+              <div className="rounded-2xl p-4" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                <p className="text-white font-semibold text-sm mb-2">Langkah 3 — Tempel token</p>
+                <p className="text-white/50 text-xs mb-3">Tempel token yang sudah disalin dari Console:</p>
+                <div className="flex flex-col gap-2">
+                  <textarea
+                    className="w-full px-3 py-2.5 rounded-xl text-white text-xs resize-none"
+                    style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.15)", outline: "none", minHeight: 72 }}
+                    placeholder="Tempel authToken di sini…"
+                    value={manualToken}
+                    onChange={(e) => setManualToken(e.target.value)}
+                    autoFocus
+                  />
+                  <input
+                    className="w-full px-3 py-2.5 rounded-xl text-white text-xs"
+                    style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.1)", outline: "none" }}
+                    placeholder="User ID (opsional — ambil dari .userId)"
+                    value={manualUserId}
+                    onChange={(e) => setManualUserId(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {error && (
+                <div className="px-3 py-2 rounded-xl text-red-400 text-xs text-center"
+                  style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                  {error}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <button onClick={() => setStep(2)}
+                  className="flex-1 py-3 rounded-xl font-semibold text-white/50 text-sm"
+                  style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                  ← Kembali
+                </button>
+                <button onClick={handleSave} disabled={loading || !manualToken.trim()}
+                  className="flex-[2] py-3 rounded-xl font-bold text-white text-sm flex items-center justify-center gap-2"
+                  style={{ background: loading || !manualToken.trim() ? "rgba(238,29,82,0.4)" : "#EE1D52" }}>
+                  {loading
+                    ? <><div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" /> Memverifikasi…</>
+                    : <><LogIn size={15} /> Masuk & Tonton</>}
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Footer note */}
+          <p className="text-white/25 text-[10px] text-center leading-relaxed mt-1">
+            Token hanya digunakan untuk terhubung ke VAVA · tidak disimpan permanen
           </p>
-        </div>
-      </motion.div>
+        </motion.div>
+      </div>
     </div>
   );
 });
