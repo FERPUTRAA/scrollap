@@ -106,7 +106,12 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
         Value::Number(n) => format!("{}{}", indent, n),
         Value::String(s) => {
             if s.len() > 80 {
-                let end = s.floor_char_boundary(77);
+                let end = {
+                    let idx = 77usize.min(s.len());
+                    let mut i = idx;
+                    while i > 0 && !s.is_char_boundary(i) { i -= 1; }
+                    i
+                };
                 format!("{}\"{}...\"", indent, &s[..end])
             } else {
                 format!("{}\"{}\"", indent, s)
