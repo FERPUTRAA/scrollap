@@ -1138,6 +1138,7 @@ const CallCard = memo(function CallCard({ call, index, isActive, onExpired }: Ca
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 type PageStatus = "loading" | "ok" | "error" | "need_auth";
+type LiveSessionStatus = "ok" | "empty" | "auth_required" | "error";
 
 export default function FaVidCall() {
   const [activeTab, setActiveTab] = useState<"Semua" | "Live" | "Panggilan">("Semua");
@@ -1149,6 +1150,8 @@ export default function FaVidCall() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(true);
   const [callSessions, setCallSessions] = useState<CallSession[]>([]);
   const [activeCallIndex, setActiveCallIndex] = useState(0);
+  const [liveSessionStatus, setLiveSessionStatus] = useState<LiveSessionStatus>("ok");
+  const [liveSessionErrorMessage, setLiveSessionErrorMessage] = useState("");
   const feedRef = useRef<HTMLDivElement>(null);
   const callFeedRef = useRef<HTMLDivElement>(null);
 
@@ -1266,6 +1269,8 @@ export default function FaVidCall() {
         const res = await fetch(`${BASE}/api/vava/live-sessions`);
         const data = await res.json() as {
           success: boolean;
+          error?: string;
+          needAuth?: boolean;
           sessions: Array<{
             channel: string;
             token: string | null;        // VAVA token (uid-specific, not used as primary)
@@ -1277,7 +1282,25 @@ export default function FaVidCall() {
             isPrivate: boolean;
           }>;
         };
-        if (!data.success || !data.sessions.length) return;
+        if (!data.success) {
+          if (data.needAuth) {
+            setLiveSessionStatus("auth_required");
+            setLiveSessionErrorMessage(data.error ?? "Kredensial VAVA perlu diperbarui");
+          } else {
+            setLiveSessionStatus("error");
+            setLiveSessionErrorMessage(data.error ?? "Gagal memuat live sessions");
+          }
+          return;
+        }
+
+        if (!data.sessions.length) {
+          setLiveSessionStatus("empty");
+          setLiveSessionErrorMessage("");
+          return;
+        }
+
+        setLiveSessionStatus("ok");
+        setLiveSessionErrorMessage("");
 
         // Build session map: always use serverToken with uid=0.
         // VAVA tokens are signed for a specific credential UID — joining with
@@ -1341,7 +1364,12 @@ export default function FaVidCall() {
           }
           return merged;
         });
-      } catch {}
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setLiveSessionStatus("error");
+          setLiveSessionErrorMessage(err instanceof Error ? err.message : "Gagal polling live sessions");
+        }
+      }
     };
 
     // Expose poll function for immediate calls (e.g. on session expiry)
@@ -1511,6 +1539,56 @@ export default function FaVidCall() {
           </div>
         )}
       </div>
+
+
+      {/* Live session health banner (non-intrusive) */}
+      {activeTab !== "Panggilan" && liveSessionStatus !== "ok" && (
+        <div className="absolute top-[112px] left-1/2 -translate-x-1/2 z-50 w-[min(92%,560px)] px-3">
+          <div className="rounded-xl px-3 py-2 text-xs"
+            style={{
+              background:
+                liveSessionStatus === "auth_required"
+                  ? "rgba(234,179,8,0.18)"
+                  : liveSessionStatus === "error"
+                    ? "rgba(239,68,68,0.18)"
+                    : "rgba(148,163,184,0.18)",
+              border:
+                liveSessionStatus === "auth_required"
+                  ? "1px solid rgba(234,179,8,0.45)"
+                  : liveSessionStatus === "error"
+                    ? "1px solid rgba(239,68,68,0.45)"
+                    : "1px solid rgba(148,163,184,0.35)",
+              backdropFilter: "blur(6px)",
+            }}>
+            {liveSessionStatus === "auth_required" && (
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-amber-200">
+                  Kredensial VAVA perlu diperbarui agar daftar live bisa dimuat.
+                </p>
+                <a
+                  href={`${BASE}/api/vava/credentials`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold text-black"
+                  style={{ background: "rgba(251,191,36,0.95)" }}
+                >
+                  Update Credentials
+                </a>
+              </div>
+            )}
+            {liveSessionStatus === "error" && (
+              <p className="text-red-200">
+                Gagal memuat live sessions{liveSessionErrorMessage ? `: ${liveSessionErrorMessage}` : ""}.
+              </p>
+            )}
+            {liveSessionStatus === "empty" && (
+              <p className="text-slate-200">
+                Saat ini belum ada host live terdeteksi. Coba lagi beberapa saat.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Nav arrows — user feed */}
       {activeTab !== "Panggilan" && activeIndex > 0 && (
