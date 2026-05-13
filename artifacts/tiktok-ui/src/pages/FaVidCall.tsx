@@ -83,6 +83,49 @@ const GRADIENTS = [
   "linear-gradient(160deg,#0d0d0d 0%,#1a1a1a 50%,#0d2137 100%)",
 ];
 
+// ─── Fetch fresh Agora token from server ──────────────────────────────────────
+async function fetchServerToken(channel: string, uid: number): Promise<string | null> {
+  try {
+    const r = await fetch(`${BASE}/api/agora/token?channel=${encodeURIComponent(channel)}&uid=${uid}`);
+    const d = await r.json() as { success: boolean; token?: string };
+    return d.success && d.token ? d.token : null;
+  } catch { return null; }
+}
+
+// ─── Try joining Agora with multiple token strategies ─────────────────────────
+async function tryJoinAgora(
+  client: IAgoraRTCClient,
+  appId: string,
+  channel: string,
+  sessionToken: string | null,
+  uid: number,
+): Promise<"joined" | "error"> {
+  // Strategy 1: token from VAVA session
+  const vavaToken = sessionToken && sessionToken.length > 10 ? sessionToken : null;
+  // Strategy 2: fresh token from our server (needs App Certificate)
+  const serverToken = await fetchServerToken(channel, uid);
+  // Strategy 3: null (some Agora apps allow audience without token)
+
+  const tokenCandidates: (string | null)[] = [];
+  if (vavaToken) tokenCandidates.push(vavaToken);
+  if (serverToken && serverToken !== vavaToken) tokenCandidates.push(serverToken);
+  tokenCandidates.push(null);
+
+  for (const tok of tokenCandidates) {
+    try {
+      await client.join(appId, channel, tok, uid);
+      return "joined";
+    } catch (e: unknown) {
+      const msg = String(e).toLowerCase();
+      // CRC/channel error = channel doesn't exist, no point retrying with other tokens
+      if (msg.includes("crc") || msg.includes("channel_not_exist") || msg.includes("not exist")) return "error";
+      // Token error → try next token
+      try { await client.leave(); } catch {}
+    }
+  }
+  return "error";
+}
+
 // ─── Agora viewer hook ────────────────────────────────────────────────────────
 function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null) {
   const clientRef = useRef<IAgoraRTCClient | null>(null);
@@ -92,11 +135,14 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
   const [remoteVideo, setRemoteVideo] = useState<IRemoteVideoTrack | null>(null);
   const [muted, setMuted] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [retryIn, setRetryIn] = useState(0);
   const pendingVideoRef = useRef<IRemoteVideoTrack | null>(null);
   const pendingAudioRef = useRef<IRemoteAudioTrack | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const cleanup = useCallback(async () => {
     const c = clientRef.current;
+    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
     if (!c) return;
     try { remoteVideoRef.current?.stop(); remoteAudioRef.current?.stop(); await c.leave(); } catch {}
     clientRef.current = null;
@@ -105,6 +151,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
     setStreamState("idle");
     setRemoteVideo(null);
     setAutoplayBlocked(false);
+    setRetryIn(0);
   }, []);
 
   const unblockAutoplay = useCallback(() => {
@@ -131,32 +178,66 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
       }
     }
 
+    async function subscribeExistingUsers(client: IAgoraRTCClient) {
+      const users = client.remoteUsers;
+      if (users.length === 0) { setStreamState("no_stream"); return; }
+      let hasVideo = false;
+      for (const user of users) {
+        if (user.hasVideo) {
+          try {
+            await client.subscribe(user, "video");
+            const track = user.videoTrack;
+            if (track && videoEl && !cancelled) {
+              await playVideoTrack(track);
+              remoteVideoRef.current = track;
+              setRemoteVideo(track);
+              setStreamState("connected");
+              hasVideo = true;
+            }
+          } catch {}
+        }
+        if (user.hasAudio) {
+          try {
+            await client.subscribe(user, "audio");
+            try { user.audioTrack?.play(); } catch {
+              if (user.audioTrack) { pendingAudioRef.current = user.audioTrack; setAutoplayBlocked(true); }
+            }
+            if (!cancelled && user.audioTrack) remoteAudioRef.current = user.audioTrack;
+          } catch {}
+        }
+      }
+      if (!hasVideo) setStreamState("no_stream");
+    }
+
     async function join() {
-      if (!session || !videoEl) return;
+      if (!session || !videoEl || cancelled) return;
       setStreamState("connecting");
       setAutoplayBlocked(false);
+      setRetryIn(0);
 
       const client = AgoraRTC.createClient({ mode: "live", codec: "h264" });
       clientRef.current = client;
-      await client.setClientRole("audience");
+      try { await client.setClientRole("audience", { level: 2 }); } catch {
+        await client.setClientRole("audience");
+      }
 
       AgoraRTC.onAutoplayFailed = () => { setAutoplayBlocked(true); };
 
       client.on("user-published", async (user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
         if (cancelled) return;
-        await client.subscribe(user, mediaType);
+        try { await client.subscribe(user, mediaType); } catch { return; }
         if (mediaType === "video") {
           const track = user.videoTrack;
-          if (track && videoEl) {
+          if (track && videoEl && !cancelled) {
             await playVideoTrack(track);
-            if (!cancelled) { remoteVideoRef.current = track; setRemoteVideo(track); setStreamState("connected"); }
+            remoteVideoRef.current = track; setRemoteVideo(track); setStreamState("connected");
           }
         }
         if (mediaType === "audio") {
           const track = user.audioTrack;
-          if (track) {
+          if (track && !cancelled) {
             try { track.play(); } catch { pendingAudioRef.current = track; setAutoplayBlocked(true); }
-            if (!cancelled) remoteAudioRef.current = track;
+            remoteAudioRef.current = track;
           }
         }
       });
@@ -168,55 +249,46 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
 
       client.on("user-left", () => { if (!cancelled) setStreamState("no_stream"); });
 
-      try {
-        // Try with token first, then null (in case token auth disabled for audience)
-        const tokenToUse = session.token && session.token.length > 5 ? session.token : null;
-        await client.join(AGORA_APP_ID, session.channel, tokenToUse, 0);
-        if (cancelled) { await client.leave(); return; }
-
-        const remoteUsers = client.remoteUsers;
-        if (remoteUsers.length === 0) {
-          setStreamState("no_stream");
-        } else {
-          for (const user of remoteUsers) {
-            if (user.hasVideo) {
-              await client.subscribe(user, "video");
-              const track = user.videoTrack;
-              if (track && videoEl) {
-                await playVideoTrack(track);
-                if (!cancelled) { remoteVideoRef.current = track; setRemoteVideo(track); setStreamState("connected"); }
-              }
-            }
-            if (user.hasAudio) {
-              await client.subscribe(user, "audio");
-              try { user.audioTrack?.play(); } catch {
-                if (user.audioTrack) { pendingAudioRef.current = user.audioTrack; setAutoplayBlocked(true); }
-              }
-              if (!cancelled && user.audioTrack) remoteAudioRef.current = user.audioTrack;
-            }
-          }
-          if (remoteUsers.length > 0 && !remoteUsers.some((u) => u.hasVideo)) setStreamState("no_stream");
-        }
-      } catch (e: unknown) {
+      client.on("connection-state-change", (cur: string) => {
         if (cancelled) return;
-        // If token error, try without token
-        const msg = String(e);
-        if (msg.includes("token") || msg.includes("invalid") || msg.includes("INVALID")) {
-          try {
-            await client.leave();
-            await client.join(AGORA_APP_ID, session.channel, null, 0);
-            setStreamState("no_stream");
-          } catch {
-            setStreamState("error");
+        if (cur === "DISCONNECTED") setStreamState("no_stream");
+      });
+
+      // Try join with multiple token strategies
+      const result = await tryJoinAgora(client, AGORA_APP_ID, session.channel, session.token, session.uid ?? 0);
+
+      if (cancelled) { try { await client.leave(); } catch {} return; }
+
+      if (result === "error") {
+        // Tidak langsung error — tampilkan no_stream dan auto-retry 30 detik lagi
+        setStreamState("no_stream");
+        let countdown = 30;
+        setRetryIn(countdown);
+        const tick = setInterval(() => {
+          countdown--;
+          setRetryIn(countdown);
+          if (countdown <= 0) clearInterval(tick);
+        }, 1000);
+        retryTimerRef.current = setTimeout(async () => {
+          clearInterval(tick);
+          if (!cancelled) {
+            try { await client.leave(); } catch {}
+            clientRef.current = null;
+            await join();
           }
-        } else {
-          setStreamState("error");
-        }
+        }, 30_000);
+        return;
       }
+
+      await subscribeExistingUsers(client);
     }
 
     join();
-    return () => { cancelled = true; cleanup(); };
+    return () => {
+      cancelled = true;
+      if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
+      cleanup();
+    };
   }, [session, videoEl, cleanup]);
 
   const toggleMute = useCallback(() => {
@@ -228,7 +300,7 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
     }
   }, [muted]);
 
-  return { streamState, remoteVideo, muted, toggleMute, cleanup, autoplayBlocked, unblockAutoplay };
+  return { streamState, remoteVideo, muted, toggleMute, cleanup, autoplayBlocked, unblockAutoplay, retryIn };
 }
 
 // ─── WS / SSE relay hook ──────────────────────────────────────────────────────
@@ -481,7 +553,7 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
   const [videoEl, setVideoEl] = useState<HTMLDivElement | null>(null);
 
   const activeSession = isActive ? session : null;
-  const { streamState, muted, toggleMute, autoplayBlocked, unblockAutoplay } =
+  const { streamState, muted, toggleMute, autoplayBlocked, unblockAutoplay, retryIn } =
     useAgoraViewer(activeSession, videoEl);
 
   useEffect(() => {
@@ -615,12 +687,15 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
         </div>
       )}
 
-      {/* Error notice */}
-      {streamState === "error" && !isConnecting && isActive && (
+      {/* Retry countdown notice (replaces permanent error) */}
+      {streamState === "no_stream" && retryIn > 0 && isActive && (
         <div className="absolute left-4 right-4 flex items-center gap-2 px-3 py-2 rounded-xl"
           style={{ top: "50%", transform: "translateY(-50%)", background: "rgba(238,29,82,0.12)", border: "1px solid rgba(238,29,82,0.25)", backdropFilter: "blur(8px)", zIndex: 20 }}>
           <VideoOff size={14} color="#EE1D52" />
-          <p className="text-white/70 text-xs">Tidak dapat bergabung ke siaran ini</p>
+          <div>
+            <p className="text-white/80 text-xs font-semibold">Channel tidak aktif saat ini</p>
+            <p className="text-white/50 text-[10px]">Coba ulang dalam {retryIn}s…</p>
+          </div>
         </div>
       )}
 

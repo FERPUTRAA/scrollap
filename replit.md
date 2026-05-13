@@ -61,6 +61,9 @@ pnpm workspace monorepo. TikTok-clone UI dengan live feed dari Hot51 API (platfo
 | `VAVA_AUTH_TOKEN` | VAVA auth token |
 | `VAVA_USER_ID` | VAVA user ID |
 | `VAVA_DEVICE_ID` | VAVA device ID |
+| `AGORA_APP_CERTIFICATE` | **App Certificate Agora** (32 hex chars dari Agora Console) — untuk generate token RTC sendiri di server. Endpoint: `GET /api/agora/token?channel=xxx&uid=0` |
+| `AGORA_CUSTOMER_ID` | Customer ID Agora (dari Agora Console → RESTful API) — untuk listing channel aktif via REST API |
+| `AGORA_CUSTOMER_SECRET` | Customer Secret Agora — pasangan AGORA_CUSTOMER_ID |
 
 ## Player Flow
 

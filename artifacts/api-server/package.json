@@ -12,6 +12,7 @@
   "dependencies": {
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
+    "agora-access-token": "^2.0.4",
     "agora-token": "^2.0.5",
     "cookie-parser": "^1.4.7",
     "cors": "^2",
