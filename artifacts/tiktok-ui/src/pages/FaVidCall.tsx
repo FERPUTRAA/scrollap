@@ -901,6 +901,15 @@ export default function FaVidCall() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(true);
   const feedRef = useRef<HTMLDivElement>(null);
 
+  // Refs to track latest state inside async callbacks/intervals (avoids stale closures)
+  const activeIndexRef = useRef(0);
+  const usersRef = useRef<VavaUser[]>([]);
+  const sessionsRef = useRef<Record<number, AgoraSession>>({});
+
+  useEffect(() => { activeIndexRef.current = activeIndex; }, [activeIndex]);
+  useEffect(() => { usersRef.current = users; }, [users]);
+  useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+
   // Check auth status on mount (non-blocking — default to authenticated)
   useEffect(() => {
     fetch(`${BASE}/api/vava/status`)
@@ -913,12 +922,19 @@ export default function FaVidCall() {
   }, []);
 
   // Assign a live session to the currently active card (stealth UID always)
+  // Only sets if the card doesn't already have an active session — prevents
+  // kicking the user out of an ongoing stream.
   const handleLiveSession = useCallback((s: AgoraSession) => {
     const stealthSession = { ...s, uid: stealthUid() };
     setActiveIndex((ai) => {
       setUsers((us) => {
         if (us.length > 0 && ai < us.length) {
-          setSessions((prev) => ({ ...prev, [us[ai].userId]: stealthSession }));
+          setSessions((prev) => {
+            const userId = us[ai].userId;
+            // Don't overwrite an existing active session
+            if (prev[userId]) return prev;
+            return { ...prev, [userId]: stealthSession };
+          });
         }
         return us;
       });
@@ -948,6 +964,13 @@ export default function FaVidCall() {
 
     const tryMatch = async () => {
       if (cancelled) return;
+
+      // Skip API call entirely if the current active card already has a session.
+      // This is the key fix: prevents overwriting an ongoing stream every 10s.
+      const ai = activeIndexRef.current;
+      const currentUser = usersRef.current[ai];
+      if (currentUser && sessionsRef.current[currentUser.userId]) return;
+
       try {
         const res = await fetch(`${BASE}/api/vava/session`, { method: "POST" });
         const data = await res.json() as {
@@ -1029,7 +1052,14 @@ export default function FaVidCall() {
         });
 
         if (Object.keys(newSessions).length > 0) {
-          setSessions((prev) => ({ ...prev, ...newSessions }));
+          // Only add sessions for cards that don't already have one — don't kick active streams
+          setSessions((prev) => {
+            const merged = { ...prev };
+            for (const [id, s] of Object.entries(newSessions)) {
+              if (!merged[Number(id)]) merged[Number(id)] = s;
+            }
+            return merged;
+          });
         }
       } catch {}
     };
