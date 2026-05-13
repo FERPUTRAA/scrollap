@@ -99,7 +99,17 @@ function stealthUid(): number {
   return Math.floor(Math.random() * 999_000_000) + 1_000_000;
 }
 
-// ─── Try joining Agora with multiple token strategies ─────────────────────────
+// ─── Detect whether a string looks like a real Agora RTC token ───────────────
+function isAgoraToken(t: string | null): boolean {
+  if (!t || t.length < 20) return false;
+  // Agora tokens start with "006" or "007" and are base64 encoded (long)
+  if ((t.startsWith("006") || t.startsWith("007")) && t.length > 80) return true;
+  // Some Agora tokens are plain base64 without a prefix but still very long
+  if (t.length > 100) return true;
+  return false;
+}
+
+// ─── Try joining Agora with multiple token/uid strategies ─────────────────────
 async function tryJoinAgora(
   client: IAgoraRTCClient,
   appId: string,
@@ -107,31 +117,37 @@ async function tryJoinAgora(
   sessionToken: string | null,
   uid: number,
 ): Promise<"joined" | "error"> {
-  // If VAVA returned a specific uid, the Agora token is tied to that userId.
-  // We MUST join with that exact uid or the token will be rejected.
-  // Only fall back to stealth if no uid was provided.
-  const joinUid = uid > 0 ? uid : stealthUid();
+  // uid=0 means "let Agora server assign a random uid" — perfectly valid.
+  // We keep uid as-is; don't convert 0 to a stealth uid.
+  const joinUid = uid;
 
-  // Strategy 1: VAVA token + matching uid (token is tied to this uid)
-  const vavaToken = sessionToken && sessionToken.length > 10 ? sessionToken : null;
-  // Strategy 2: fresh server-generated token for the same uid
-  const serverToken = await fetchServerToken(channel, joinUid);
+  // Strategy 1: Real Agora token (agoraToken from VAVA — starts with 006/007)
+  const vavaToken = isAgoraToken(sessionToken) ? sessionToken : null;
 
+  // Strategy 2: server-generated token (only works if AGORA_APP_CERTIFICATE is set)
+  const serverToken = await fetchServerToken(channel, joinUid === 0 ? 0 : joinUid);
+
+  // Build token candidates to try in order
   const tokenCandidates: (string | null)[] = [];
   if (vavaToken) tokenCandidates.push(vavaToken);
   if (serverToken && serverToken !== vavaToken) tokenCandidates.push(serverToken);
-  tokenCandidates.push(null);
+  tokenCandidates.push(null); // last resort: open channel (no token)
+
+  // Also try uid=0 as secondary uid if original uid is specific
+  const uidCandidates = joinUid !== 0 ? [joinUid, 0] : [0];
 
   for (const tok of tokenCandidates) {
-    try {
-      await client.join(appId, channel, tok, joinUid);
-      return "joined";
-    } catch (e: unknown) {
-      const msg = String(e).toLowerCase();
-      // CRC/channel error = channel doesn't exist, no point retrying with other tokens
-      if (msg.includes("crc") || msg.includes("channel_not_exist") || msg.includes("not exist")) return "error";
-      // Token error → try next token
-      try { await client.leave(); } catch {}
+    for (const tryUid of uidCandidates) {
+      try {
+        await client.join(appId, channel, tok, tryUid);
+        return "joined";
+      } catch (e: unknown) {
+        const msg = String(e).toLowerCase();
+        // CRC/channel error = channel doesn't exist, no point retrying
+        if (msg.includes("crc") || msg.includes("channel_not_exist") || msg.includes("not exist")) return "error";
+        // Token/uid error → try next combination
+        try { await client.leave(); } catch {}
+      }
     }
   }
   return "error";
@@ -921,11 +937,14 @@ export default function FaVidCall() {
       .catch(() => {}); // keep true on network error
   }, []);
 
-  // Assign a live session to the currently active card (stealth UID always)
+  // Assign a live session to the currently active card.
+  // Preserves the uid from the session — each source sets its own:
+  //   - WS relay: credential userId (token tied to that uid)
+  //   - live_table: 0 (let Agora server assign)
+  //   - match: credential userId (token tied to that uid)
   // Only sets if the card doesn't already have an active session — prevents
   // kicking the user out of an ongoing stream.
   const handleLiveSession = useCallback((s: AgoraSession) => {
-    const stealthSession = { ...s, uid: stealthUid() };
     setActiveIndex((ai) => {
       setUsers((us) => {
         if (us.length > 0 && ai < us.length) {
@@ -933,7 +952,7 @@ export default function FaVidCall() {
             const userId = us[ai].userId;
             // Don't overwrite an existing active session
             if (prev[userId]) return prev;
-            return { ...prev, [userId]: stealthSession };
+            return { ...prev, [userId]: s };
           });
         }
         return us;
@@ -1017,7 +1036,8 @@ export default function FaVidCall() {
         data.sessions.forEach((s) => {
           if (s.hostUserId && s.channel) {
             newSessions[s.hostUserId] = {
-              channel: s.channel, token: s.token, uid: stealthUid(), peerId: null, source: "live_table"
+              // uid=0 → Agora server assigns a random uid (safe, anonymous viewer)
+              channel: s.channel, token: s.token, uid: 0, peerId: null, source: "live_table"
             };
           }
         });

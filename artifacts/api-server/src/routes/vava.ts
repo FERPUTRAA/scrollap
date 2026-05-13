@@ -460,11 +460,12 @@ vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
 
     const sessionList = d?.data?.sessionList ?? [];
     const sessions = sessionList
-      .filter((s) => s.channel && (s.authToken || s.agoraToken))
+      .filter((s) => s.channel && (s.agoraToken || s.authToken))
       .map((s) => ({
         orderId: s.orderId ?? null,
         channel: s.channel!,
-        token: s.authToken ?? s.agoraToken ?? null,
+        // Prefer agoraToken (real Agora RTC token) over authToken (VAVA internal token)
+        token: s.agoraToken ?? s.authToken ?? null,
         appId: AGORA_APP_ID,
         hostUserId: s.hostUserId ?? null,
         hostDisplayName: s.hostDisplayName ?? "Host",
@@ -531,13 +532,15 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
     }
 
     const d = winResult?.data;
-    if (d?.channel && (d?.authToken || d?.agoraToken)) {
+    if (d?.channel && (d?.agoraToken || d?.authToken)) {
       // Return the exact userId whose credential generated this token.
       // The frontend MUST join Agora with this uid so the token validates.
       const uid = winCred ? Number(winCred.userId) : 0;
       return res.json({
         success: true, appId: AGORA_APP_ID,
-        channel: d.channel, token: d.authToken ?? d.agoraToken,
+        channel: d.channel,
+        // Prefer agoraToken (real Agora RTC token) over authToken (VAVA internal token)
+        token: d.agoraToken ?? d.authToken,
         uid,
         peerId: d.peerId ?? d.peerUserId ?? null, orderNo: d.orderNo ?? null,
       });
