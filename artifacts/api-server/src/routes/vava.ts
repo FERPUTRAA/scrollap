@@ -120,23 +120,6 @@ async function vavaPost(path: string, body: Record<string, unknown>, cred = CRED
   try { return JSON.parse(text); } catch { throw new Error(`Bad JSON: ${text.slice(0, 200)}`); }
 }
 
-async function vavaGetBoth(path: string, qs = ""): Promise<{ result: unknown; credUsed: typeof CREDS | typeof CREDS_FALLBACK }> {
-  const [r1, r2] = await Promise.allSettled([
-    vavaGet(path, qs, CREDS),
-    vavaGet(path, qs, CREDS_FALLBACK),
-  ]);
-
-  for (const [r, cred] of [[r1, CREDS], [r2, CREDS_FALLBACK]] as const) {
-    if (r.status === "fulfilled") {
-      const d = r.value as { failureResponse?: { status: number } };
-      if (d?.failureResponse?.status === 521) continue;
-      return { result: r.value, credUsed: cred };
-    }
-  }
-
-  if (r1.status === "fulfilled") return { result: r1.value, credUsed: CREDS };
-  throw new Error("All credentials failed");
-}
 
 async function validateCreds(): Promise<boolean> {
   if (Date.now() - lastValidationTime < VALIDATION_TTL) return CREDS.valid || CREDS_FALLBACK.valid;
@@ -516,6 +499,7 @@ vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
         };
       });
 
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     return res.json({ success: true, sessions });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

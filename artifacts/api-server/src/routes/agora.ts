@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { fetch as undiciFetch } from "undici";
-import { buildTokenV2, buildTokenV1 } from "../lib/agora-token.js";
+import { buildTokenV1 } from "../lib/agora-token.js";
 
 const agoraRouter = Router();
 
@@ -38,18 +38,14 @@ agoraRouter.get("/agora/token", (req: Request, res: Response) => {
     const uidNum = parseInt(uid, 10) || 0;
     const expiryNum = parseInt(expiry, 10) || 86400;
 
-    // Try Token V2 first (newer format), V1 as fallback
-    const tokenV2 = buildTokenV2(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel, uidNum, expiryNum);
-    const tokenV1 = buildTokenV1(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel, uidNum, expiryNum);
+    const token = buildTokenV1(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel, uidNum, expiryNum);
 
     return res.json({
       success: true,
       appId: AGORA_APP_ID,
       channel,
       uid: uidNum,
-      tokenV2,
-      tokenV1,
-      token: tokenV2, // default to V2
+      token,
       expiresIn: expiryNum,
     });
   } catch (err: unknown) {

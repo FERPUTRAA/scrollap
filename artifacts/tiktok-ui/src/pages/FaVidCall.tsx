@@ -29,7 +29,6 @@ import {
   Wifi,
   LogIn,
   RefreshCw,
-  Shield,
   Video,
   VideoOff,
 } from "lucide-react";
@@ -96,19 +95,12 @@ async function fetchServerToken(channel: string, uid: number): Promise<string | 
   } catch { return null; }
 }
 
-// ─── Generate random stealth UID (avoid 0 which can be traceable) ────────────
-function stealthUid(): number {
-  return Math.floor(Math.random() * 999_000_000) + 1_000_000;
-}
-
 // ─── Detect whether a string looks like a real Agora RTC token ───────────────
+// Only accept strings that actually start with the known Agora token prefixes.
+// Previous version accepted ANY string >100 chars which caused false positives.
 function isAgoraToken(t: string | null): boolean {
-  if (!t || t.length < 20) return false;
-  // Agora tokens start with "006" or "007" and are base64 encoded (long)
-  if ((t.startsWith("006") || t.startsWith("007")) && t.length > 80) return true;
-  // Some Agora tokens are plain base64 without a prefix but still very long
-  if (t.length > 100) return true;
-  return false;
+  if (!t || t.length < 80) return false;
+  return t.startsWith("006") || t.startsWith("007");
 }
 
 // ─── Try joining Agora with multiple token/uid strategies ─────────────────────
@@ -133,9 +125,13 @@ async function tryJoinAgora(
   const sessionServerToken = isAgoraToken(session.serverToken ?? null) ? session.serverToken! : null;
   if (sessionServerToken && sessionServerToken !== primaryToken) tokenCandidates.push(sessionServerToken);
 
-  const freshServerToken = await fetchServerToken(channel, joinUid === 0 ? 0 : joinUid);
-  if (freshServerToken && freshServerToken !== primaryToken && freshServerToken !== sessionServerToken) {
-    tokenCandidates.push(freshServerToken);
+  // Only fetch a fresh server token when we don't already have one.
+  // Calling fetchServerToken unconditionally adds 100-500ms latency on every join.
+  if (!sessionServerToken) {
+    const freshServerToken = await fetchServerToken(channel, joinUid === 0 ? 0 : joinUid);
+    if (freshServerToken && freshServerToken !== primaryToken) {
+      tokenCandidates.push(freshServerToken);
+    }
   }
 
   tokenCandidates.push(null); // last resort: open channel
@@ -348,12 +344,15 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
         }
       });
 
-      client.on("connection-state-change", (cur: string) => {
+      client.on("connection-state-change", (cur: string, _prev: string, reason?: string) => {
         if (cancelled) return;
         // Ignore DISCONNECTED during join phase — it fires on every client.leave()
         // retry inside tryJoinAgora. Only handle it after we are truly joined.
         if (!joinSucceeded) return;
         if (cur === "DISCONNECTED") {
+          // TOKEN_EXPIRED: log and call onExpired so parent can regenerate
+          // UID_BANNED: log but do NOT retry same channel
+          if (reason) console.warn("[Agora] disconnect reason:", reason);
           setStreamState("no_stream");
           setTimeout(() => { if (!cancelled && onExpired) onExpired(); }, 2_000);
         }
@@ -999,15 +998,21 @@ export default function FaVidCall() {
 
   const wsStatus = useVavaRelay(handleLiveSession);
 
+  // Ref so handleSessionExpired can trigger an immediate live-sessions poll
+  // without creating a circular dependency with the pollLiveSessions effect.
+  const pollNowRef = useRef<(() => void) | null>(null);
+
   // ── Session expiry handler ─────────────────────────────────────────────────
-  // Called by LiveCard when Agora disconnects — clears stale session so matching
-  // poll gets a fresh one immediately.
+  // Called by LiveCard when Agora disconnects — clears stale session and triggers
+  // an immediate re-poll so the user gets a fresh stream without the 20s wait.
   const handleSessionExpired = useCallback((userId: number) => {
     setSessions((prev) => {
       const next = { ...prev };
       delete next[userId];
       return next;
     });
+    // Trigger immediate poll instead of waiting up to 20s
+    pollNowRef.current?.();
   }, []);
 
   // ── Matching poll REMOVED ──────────────────────────────────────────────────
@@ -1087,22 +1092,35 @@ export default function FaVidCall() {
           return newHosts.length > 0 ? [...newHosts, ...updated] : updated;
         });
 
-        if (Object.keys(newSessions).length > 0) {
-          // Only add sessions for cards that don't already have one — never kick active streams
-          setSessions((prev) => {
-            const merged = { ...prev };
-            for (const [id, s] of Object.entries(newSessions)) {
-              if (!merged[Number(id)]) merged[Number(id)] = s;
-            }
-            return merged;
-          });
-        }
+        // Remove sessions for hosts no longer in the live table (they went offline).
+        // Also add sessions for new live hosts, but never overwrite an active session.
+        setSessions((prev) => {
+          const merged: Record<number, AgoraSession> = {};
+          for (const [id, s] of Object.entries(prev)) {
+            const hostId = Number(id);
+            // Keep the session ONLY if this host is still in the live table
+            if (newSessions[hostId]) merged[hostId] = s;
+          }
+          for (const [id, s] of Object.entries(newSessions)) {
+            const hostId = Number(id);
+            // Add new sessions for hosts not already active
+            if (!merged[hostId]) merged[hostId] = s;
+          }
+          return merged;
+        });
       } catch {}
     };
 
+    // Expose poll function for immediate calls (e.g. on session expiry)
+    pollNowRef.current = () => { if (!cancelled) pollLiveSessions(); };
+
     if (!cancelled) pollLiveSessions();
     const interval = setInterval(() => { if (!cancelled) pollLiveSessions(); }, 20_000);
-    return () => { cancelled = true; clearInterval(interval); };
+    return () => {
+      cancelled = true;
+      pollNowRef.current = null;
+      clearInterval(interval);
+    };
   }, [isAuthenticated]);
 
   const fetchUsers = useCallback(async () => {
@@ -1163,7 +1181,7 @@ export default function FaVidCall() {
 
   const effectiveUsers =
     activeTab === "Live"
-      ? sortedUsers.filter((u) => u.isLiveHost || u.busy || !!sessions[u.userId])
+      ? sortedUsers.filter((u) => u.isLiveHost || !!sessions[u.userId])
       : sortedUsers;
 
   const scrollToIndex = (idx: number) => {
