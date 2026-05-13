@@ -66,11 +66,12 @@ interface VavaUser {
 
 interface AgoraSession {
   channel: string;
-  token: string | null;       // primary token (VAVA original)
-  serverToken?: string | null; // fallback: our cert-signed token
+  token: string | null;       // primary token (server cert-signed, uid=0)
+  serverToken?: string | null; // server cert-signed token (uid=0)
   uid: number;
   peerId: number | null;
   source?: "ws" | "api" | "live_table" | "match";
+  isPrivate?: boolean;
 }
 
 type StreamState = "idle" | "connecting" | "connected" | "no_stream" | "error";
@@ -413,9 +414,17 @@ function useVavaRelay(onSession: (s: AgoraSession) => void) {
     es.addEventListener("ws_error", () => setWsStatus("error"));
     es.addEventListener("agora_session", (e: MessageEvent) => {
       try {
-        const d = JSON.parse(e.data) as { appId: string; channel: string; token: string; serverToken?: string | null; uid: number };
+        const d = JSON.parse(e.data) as { appId: string; channel: string; token: string | null; serverToken?: string | null; uid: number };
         if (d.channel && (d.token || d.serverToken)) {
-          onSession({ channel: d.channel, token: d.token, serverToken: d.serverToken ?? null, uid: d.uid ?? 0, peerId: null, source: "ws" });
+          // Prefer serverToken (cert-signed, uid=0) over VAVA token (uid-specific)
+          onSession({
+            channel: d.channel,
+            token: d.serverToken ?? d.token,   // server cert-signed as primary
+            serverToken: d.serverToken ?? null,
+            uid: 0,                             // always anonymous viewer
+            peerId: null,
+            source: "ws",
+          });
         }
       } catch {}
     });
@@ -733,6 +742,14 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
             </span>
           )}
 
+          {/* Private live badge */}
+          {session?.isPrivate && (
+            <span className="flex items-center gap-1 px-2 py-1 rounded-full text-white text-[10px] font-bold"
+              style={{ background: "rgba(139,92,246,0.9)", backdropFilter: "blur(6px)" }}>
+              🔒 PRIVATE
+            </span>
+          )}
+
           {/* Viewer count */}
           {(isStreaming || user.isLiveHost) && typeof user.viewerCount === "number" && user.viewerCount > 0 && (
             <span className="flex items-center gap-1 px-2 py-1 rounded-full text-white text-[10px] font-semibold"
@@ -910,10 +927,10 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
           <Users size={11} color="rgba(255,255,255,0.7)" />
           <p className="text-white/70 text-xs drop-shadow">
             {isStreaming
-              ? `🔴 Sedang live${user.viewerCount ? ` · ${user.viewerCount.toLocaleString("id-ID")} penonton` : ""}`
+              ? `🔴 ${session?.isPrivate ? "Live Private" : "Sedang live"}${user.viewerCount ? ` · ${user.viewerCount.toLocaleString("id-ID")} penonton` : ""}`
               : session ? "📡 Bergabung ke channel siaran…"
               : user.isLiveHost ? `📹 Live sekarang${user.viewerCount ? ` · ${user.viewerCount.toLocaleString("id-ID")} penonton` : ""}`
-              : user.withVideoPass ? "🎬 Tersedia di video pass"
+              : user.withVideoPass ? "🔒 Siaran Private"
               : user.busy ? "📹 Sedang siaran"
               : "⏳ Menunggu siaran dimulai"}
           </p>
@@ -993,47 +1010,16 @@ export default function FaVidCall() {
     });
   }, []);
 
-  // ── Matching poll ──────────────────────────────────────────────────────────
-  // This is the PRIMARY mechanism to get live streams.
-  // VAVA matching connects us to a host's Agora channel as silent audience.
-  // We use a stealth random UID so VAVA cannot identify us.
-  useEffect(() => {
-    let cancelled = false;
+  // ── Matching poll REMOVED ──────────────────────────────────────────────────
+  // Auto-calling /vava/session every 10s was the root cause of "terlempar":
+  // - It creates real VAVA video call sessions (burns coins, not for watching live)
+  // - Gets user kicked when matching disconnects or token expires
+  // - live/session/table/v2 (polled below) is the correct source for live streams
 
-    const tryMatch = async () => {
-      if (cancelled) return;
-
-      // Skip API call entirely if the current active card already has a session.
-      // This is the key fix: prevents overwriting an ongoing stream every 10s.
-      const ai = activeIndexRef.current;
-      const currentUser = usersRef.current[ai];
-      if (currentUser && sessionsRef.current[currentUser.userId]) return;
-
-      try {
-        const res = await fetch(`${BASE}/api/vava/session`, { method: "POST" });
-        const data = await res.json() as {
-          success: boolean; waiting?: boolean;
-          channel?: string; token?: string | null; uid?: number; peerId?: number | null;
-        };
-        if (data.success && data.channel && !cancelled) {
-          handleLiveSession({
-            channel: data.channel,
-            token: data.token ?? null,
-            uid: data.uid ?? 0,
-            peerId: data.peerId ?? null,
-            source: "match",
-          });
-        }
-      } catch {}
-    };
-
-    const t = setTimeout(tryMatch, 800);
-    const interval = setInterval(tryMatch, 10_000);
-    return () => { cancelled = true; clearTimeout(t); clearInterval(interval); };
-  }, [handleLiveSession]);
-
-  // Poll live sessions from VAVA live session table every 20s (bonus — may return data)
-  // STEALTH: only reads the table, never creates a session
+  // Poll live sessions from VAVA live session table every 20s
+  // STEALTH: only reads the table, never creates a matching session
+  // PRIMARY source for all live streams — uses server-signed token (uid=0) so
+  // we never need to match UIDs with VAVA tokens (which causes UID_BANNED kicks)
   useEffect(() => {
     let cancelled = false;
 
@@ -1043,20 +1029,33 @@ export default function FaVidCall() {
         const data = await res.json() as {
           success: boolean;
           sessions: Array<{
-            channel: string; token: string | null;
-            hostUserId: number | null; hostDisplayName: string;
-            hostProfilePicture: string | null; viewerCount: number;
+            channel: string;
+            token: string | null;        // VAVA token (uid-specific, not used as primary)
+            serverToken: string | null;  // our cert-signed token (uid=0) — USE THIS
+            hostUserId: number | null;
+            hostDisplayName: string;
+            hostProfilePicture: string | null;
+            viewerCount: number;
+            isPrivate: boolean;
           }>;
         };
         if (!data.success || !data.sessions.length) return;
 
-        // Map sessions by hostUserId (stealth: never call matching API)
+        // Build session map: always use serverToken with uid=0.
+        // VAVA tokens are signed for a specific credential UID — joining with
+        // uid=0 or a different UID causes "UID_BANNED" / token rejection kicks.
+        // Our certificate-signed token is valid for uid=0 (anonymous viewer).
         const newSessions: Record<number, AgoraSession> = {};
         data.sessions.forEach((s) => {
           if (s.hostUserId && s.channel) {
             newSessions[s.hostUserId] = {
-              // uid=0 → Agora server assigns a random uid (safe, anonymous viewer)
-              channel: s.channel, token: s.token, uid: 0, peerId: null, source: "live_table"
+              channel: s.channel,
+              token: s.serverToken ?? s.token,  // server cert-signed (uid=0) preferred
+              serverToken: s.serverToken ?? null,
+              uid: 0,                           // always 0 — anonymous viewer
+              peerId: null,
+              source: "live_table",
+              isPrivate: s.isPrivate ?? false,
             };
           }
         });
@@ -1074,24 +1073,22 @@ export default function FaVidCall() {
               callCost: 0, country: "Indonesia", countryCode: "ID",
               countryFlagUrl: "", language: "id", distance: null,
               starSign: null, astrologicalIconUrl: null, hobbies: [],
-              withVideoPass: false, viewerCount: s.viewerCount, isLiveHost: true,
+              withVideoPass: s.isPrivate ?? false,
+              viewerCount: s.viewerCount, isLiveHost: true,
             }));
 
-          // Update viewerCount for existing live hosts
+          // Update viewerCount and live status for existing hosts
           const updated = us.map((u) => {
             const live = data.sessions.find((s) => s.hostUserId === u.userId);
             if (live) return { ...u, viewerCount: live.viewerCount, isLiveHost: true, busy: true };
             return u;
           });
 
-          if (newHosts.length > 0) {
-            return [...newHosts, ...updated];
-          }
-          return updated;
+          return newHosts.length > 0 ? [...newHosts, ...updated] : updated;
         });
 
         if (Object.keys(newSessions).length > 0) {
-          // Only add sessions for cards that don't already have one — don't kick active streams
+          // Only add sessions for cards that don't already have one — never kick active streams
           setSessions((prev) => {
             const merged = { ...prev };
             for (const [id, s] of Object.entries(newSessions)) {

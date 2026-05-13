@@ -444,40 +444,79 @@ vavaRouter.post("/vava/google-register", async (req: Request, res: Response) => 
 
 // GET /api/vava/live-sessions — get active live Agora sessions from VAVA
 vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
-  try {
-    const { result } = await vavaGetBoth("live/session/table/v2");
-    const d = result as {
-      data?: {
-        sessionList?: Array<{
-          orderId?: string; channel?: string; authToken?: string; agoraToken?: string;
-          hostUserId?: number; hostDisplayName?: string; hostProfilePicture?: string;
-          viewerCount?: number; duration?: number;
-        }>;
-      };
-      failureResponse?: { status: number; detailedDescription: string };
-    };
+  type LiveSession = {
+    orderId?: string; channel?: string; authToken?: string; agoraToken?: string;
+    hostUserId?: number; hostDisplayName?: string; hostProfilePicture?: string;
+    viewerCount?: number; duration?: number; sessionType?: number; liveType?: number;
+    isPrivate?: boolean; isPrivateLive?: boolean; privateFlag?: number;
+    sessionTag?: string; liveTag?: string; roomType?: number;
+  };
 
-    if (d?.failureResponse?.status === 521) {
-      return res.json({ success: false, error: "Perlu login VAVA", needAuth: true, sessions: [] });
+  try {
+    // Try both credentials in parallel for maximum session coverage
+    const [r1, r2] = await Promise.allSettled([
+      vavaGet("live/session/table/v2", "", CREDS),
+      vavaGet("live/session/table/v2", "", CREDS_FALLBACK),
+    ]);
+
+    const allSessions: LiveSession[] = [];
+    const seenChannels = new Set<string>();
+
+    for (const result of [r1, r2]) {
+      if (result.status !== "fulfilled") continue;
+      const d = result.value as {
+        data?: { sessionList?: LiveSession[] };
+        failureResponse?: { status: number };
+      };
+      if (d?.failureResponse?.status === 521) continue;
+      const list = d?.data?.sessionList ?? [];
+      for (const s of list) {
+        if (s.channel && !seenChannels.has(s.channel)) {
+          seenChannels.add(s.channel);
+          allSessions.push(s);
+        }
+      }
     }
 
-    const sessionList = d?.data?.sessionList ?? [];
-    const sessions = sessionList
-      .filter((s) => s.channel && (s.agoraToken || s.authToken))
-      .map((s) => ({
-        orderId: s.orderId ?? null,
-        channel: s.channel!,
-        // Prefer agoraToken (real Agora RTC token) over authToken (VAVA internal token)
-        token: s.agoraToken ?? s.authToken ?? null,
-        appId: AGORA_APP_ID,
-        hostUserId: s.hostUserId ?? null,
-        hostDisplayName: s.hostDisplayName ?? "Host",
-        hostProfilePicture: s.hostProfilePicture ? `${VAVA_CDN}/${s.hostProfilePicture}` : null,
-        viewerCount: s.viewerCount ?? 0,
-        duration: s.duration ?? 0,
-      }));
+    if (allSessions.length === 0 && r1.status === "fulfilled") {
+      const d = r1.value as { failureResponse?: { status: number } };
+      if (d?.failureResponse?.status === 521) {
+        return res.json({ success: false, error: "Perlu login VAVA", needAuth: true, sessions: [] });
+      }
+    }
 
-    return res.json({ success: true, sessions, raw: d?.data ?? null });
+    const sessions = allSessions
+      .filter((s) => s.channel)
+      .map((s) => {
+        // Always generate a server-signed token for uid=0 (anonymous viewer).
+        // VAVA tokens are signed for a specific uid, so using them with uid=0 fails.
+        // Our certificate-signed token works for any uid including 0.
+        const serverToken = generateToken(AGORA_APP_ID, AGORA_APP_CERTIFICATE, s.channel!, 0);
+
+        // Detect private live sessions from various field patterns
+        const isPrivate = !!(
+          s.isPrivate || s.isPrivateLive ||
+          (typeof s.privateFlag === "number" && s.privateFlag > 0) ||
+          s.sessionType === 2 || s.liveType === 2 || s.roomType === 2 ||
+          s.sessionTag === "private" || s.liveTag === "private"
+        );
+
+        return {
+          orderId: s.orderId ?? null,
+          channel: s.channel!,
+          token: s.agoraToken ?? s.authToken ?? null,   // VAVA token (uid-specific, fallback)
+          serverToken,                                   // Our token (uid=0, primary for viewing)
+          appId: AGORA_APP_ID,
+          hostUserId: s.hostUserId ?? null,
+          hostDisplayName: s.hostDisplayName ?? "Host",
+          hostProfilePicture: s.hostProfilePicture ? `${VAVA_CDN}/${s.hostProfilePicture}` : null,
+          viewerCount: s.viewerCount ?? 0,
+          duration: s.duration ?? 0,
+          isPrivate,
+        };
+      });
+
+    return res.json({ success: true, sessions });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return res.status(502).json({ success: false, error: msg, sessions: [] });
