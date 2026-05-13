@@ -84,11 +84,17 @@ pnpm workspace monorepo. TikTok-clone UI dengan live feed dari Hot51 API (platfo
 
 ## User Preferences
 
-- Selalu gunakan prefix `rtk` untuk perintah shell. Contoh:
-  - `rtk git status` bukan `git status`
-  - `rtk git diff --stat` bukan `git diff --stat`
-  - `rtk ls` bukan `ls`
-  - `rtk cat package.json` bukan `cat package.json`
+- **WAJIB**: Semua perintah shell harus menggunakan prefix `rtk`. Tidak boleh ada perintah langsung tanpa `rtk`.
+  - `rtk git status` — bukan `git status`
+  - `rtk git diff --stat` — bukan `git diff --stat`
+  - `rtk git diff` — bukan `git diff`
+  - `rtk ls` — bukan `ls`
+  - `rtk ls -la` — bukan `ls -la`
+  - `rtk cat package.json` — bukan `cat package.json`
+  - `rtk cat src/index.ts` — bukan `cat src/index.ts`
+  - `rtk grep -r "foo" .` — bukan `grep -r "foo" .`
+  - `rtk find . -name "*.ts"` — bukan `find . -name "*.ts"`
+  - Dan semua perintah shell lainnya — selalu lewat `rtk`
 
 ## Gotchas
 
