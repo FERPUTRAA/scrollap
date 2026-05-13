@@ -60,6 +60,8 @@ interface VavaUser {
   astrologicalIconUrl: string | null;
   hobbies: string[];
   withVideoPass: boolean;
+  viewerCount?: number;
+  isLiveHost?: boolean;
 }
 
 interface AgoraSession {
@@ -92,6 +94,11 @@ async function fetchServerToken(channel: string, uid: number): Promise<string | 
   } catch { return null; }
 }
 
+// ─── Generate random stealth UID (avoid 0 which can be traceable) ────────────
+function stealthUid(): number {
+  return Math.floor(Math.random() * 999_000_000) + 1_000_000;
+}
+
 // ─── Try joining Agora with multiple token strategies ─────────────────────────
 async function tryJoinAgora(
   client: IAgoraRTCClient,
@@ -100,10 +107,13 @@ async function tryJoinAgora(
   sessionToken: string | null,
   uid: number,
 ): Promise<"joined" | "error"> {
-  // Strategy 1: token from VAVA session
+  // Always use a random stealth UID so VAVA cannot track us
+  const stealthId = uid > 0 ? uid : stealthUid();
+
+  // Strategy 1: token from VAVA live session table
   const vavaToken = sessionToken && sessionToken.length > 10 ? sessionToken : null;
   // Strategy 2: fresh token from our server (needs App Certificate)
-  const serverToken = await fetchServerToken(channel, uid);
+  const serverToken = await fetchServerToken(channel, stealthId);
   // Strategy 3: null (some Agora apps allow audience without token)
 
   const tokenCandidates: (string | null)[] = [];
@@ -113,7 +123,7 @@ async function tryJoinAgora(
 
   for (const tok of tokenCandidates) {
     try {
-      await client.join(appId, channel, tok, uid);
+      await client.join(appId, channel, tok, stealthId);
       return "joined";
     } catch (e: unknown) {
       const msg = String(e).toLowerCase();
@@ -686,17 +696,28 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
               VAVA LIVE
             </span>
           )}
+
+          {/* Viewer count */}
+          {(isStreaming || user.isLiveHost) && typeof user.viewerCount === "number" && user.viewerCount > 0 && (
+            <span className="flex items-center gap-1 px-2 py-1 rounded-full text-white text-[10px] font-semibold"
+              style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }}>
+              <Eye size={10} />
+              {user.viewerCount.toLocaleString("id-ID")}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1 text-white text-[10px] font-bold px-2 py-1 rounded-full"
-            style={{
-              background: wsStatus === "connected" ? "rgba(34,197,94,0.25)" : "rgba(250,204,21,0.2)",
-              border: `1px solid ${wsStatus === "connected" ? "rgba(34,197,94,0.5)" : "rgba(250,204,21,0.4)"}`,
-            }}>
-            <span className={`w-1.5 h-1.5 rounded-full ${wsStatus === "connected" ? "bg-green-400 animate-pulse" : "bg-yellow-400 animate-pulse"}`} />
-            {wsStatus === "connected" ? "SIARAN AKTIF" : "MENCARI…"}
-          </span>
+          {(isStreaming || session) && (
+            <span className="flex items-center gap-1 text-white text-[10px] font-bold px-2 py-1 rounded-full"
+              style={{
+                background: "rgba(34,197,94,0.25)",
+                border: "1px solid rgba(34,197,94,0.5)",
+              }}>
+              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+              SIARAN AKTIF
+            </span>
+          )}
         </div>
       </div>
 
@@ -852,8 +873,10 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
         <div className="flex items-center gap-2">
           <Users size={11} color="rgba(255,255,255,0.7)" />
           <p className="text-white/70 text-xs drop-shadow">
-            {isStreaming ? "🔴 Sedang live sekarang"
-              : session ? "📡 Bergabung ke channel siaran"
+            {isStreaming
+              ? `🔴 Sedang live${user.viewerCount ? ` · ${user.viewerCount.toLocaleString("id-ID")} penonton` : ""}`
+              : session ? "📡 Bergabung ke channel siaran…"
+              : user.isLiveHost ? `📹 Live sekarang${user.viewerCount ? ` · ${user.viewerCount.toLocaleString("id-ID")} penonton` : ""}`
               : user.withVideoPass ? "🎬 Tersedia di video pass"
               : user.busy ? "📹 Sedang siaran"
               : "⏳ Menunggu siaran dimulai"}
@@ -889,11 +912,13 @@ export default function FaVidCall() {
   }, []);
 
   // Passive WS relay: when a live session arrives, assign it to the active card
+  // Use stealth UID — never expose our real VAVA userId to Agora
   const handleLiveSession = useCallback((s: AgoraSession) => {
+    const stealthSession = { ...s, uid: stealthUid() };
     setActiveIndex((ai) => {
       setUsers((us) => {
         if (us.length > 0 && ai < us.length) {
-          setSessions((prev) => ({ ...prev, [us[ai].userId]: s }));
+          setSessions((prev) => ({ ...prev, [us[ai].userId]: stealthSession }));
         }
         return us;
       });
@@ -903,7 +928,8 @@ export default function FaVidCall() {
 
   const wsStatus = useVavaRelay(handleLiveSession);
 
-  // Poll live sessions from VAVA live session table every 30s
+  // Poll live sessions from VAVA live session table every 20s
+  // This is STEALTH: we only READ the session table, never call the matching API
   useEffect(() => {
     let cancelled = false;
 
@@ -912,54 +938,63 @@ export default function FaVidCall() {
         const res = await fetch(`${BASE}/api/vava/live-sessions`);
         const data = await res.json() as {
           success: boolean;
-          sessions: Array<{ channel: string; token: string | null; hostUserId: number | null }>;
+          sessions: Array<{
+            channel: string; token: string | null;
+            hostUserId: number | null; hostDisplayName: string;
+            hostProfilePicture: string | null; viewerCount: number;
+          }>;
         };
-        if (data.success && data.sessions.length > 0) {
-          setUsers((us) => {
-            if (us.length === 0) return us;
-            const newSessions: Record<number, AgoraSession> = {};
-            data.sessions.forEach((s, i) => {
-              if (i < us.length) {
-                newSessions[us[i].userId] = {
-                  channel: s.channel, token: s.token, uid: 0, peerId: null, source: "live_table"
-                };
-              }
-            });
-            if (Object.keys(newSessions).length > 0) {
-              setSessions((prev) => ({ ...prev, ...newSessions }));
-            }
-            return us;
+        if (!data.success || !data.sessions.length) return;
+
+        // Map sessions by hostUserId (stealth: never call matching API)
+        const newSessions: Record<number, AgoraSession> = {};
+        data.sessions.forEach((s) => {
+          if (s.hostUserId && s.channel) {
+            newSessions[s.hostUserId] = {
+              channel: s.channel, token: s.token, uid: stealthUid(), peerId: null, source: "live_table"
+            };
+          }
+        });
+
+        // Merge live hosts into users list if not already present
+        setUsers((us) => {
+          const seenIds = new Set(us.map((u) => u.userId));
+          const newHosts: VavaUser[] = data.sessions
+            .filter((s) => s.hostUserId && !seenIds.has(s.hostUserId) && s.channel)
+            .map((s) => ({
+              userId: s.hostUserId!,
+              displayName: s.hostDisplayName || "Host",
+              profilePictureUrl: s.hostProfilePicture ?? "",
+              age: null, online: true, busy: true, verified: false,
+              callCost: 0, country: "Indonesia", countryCode: "ID",
+              countryFlagUrl: "", language: "id", distance: null,
+              starSign: null, astrologicalIconUrl: null, hobbies: [],
+              withVideoPass: false, viewerCount: s.viewerCount, isLiveHost: true,
+            }));
+
+          // Update viewerCount for existing live hosts
+          const updated = us.map((u) => {
+            const live = data.sessions.find((s) => s.hostUserId === u.userId);
+            if (live) return { ...u, viewerCount: live.viewerCount, isLiveHost: true, busy: true };
+            return u;
           });
+
+          if (newHosts.length > 0) {
+            return [...newHosts, ...updated];
+          }
+          return updated;
+        });
+
+        if (Object.keys(newSessions).length > 0) {
+          setSessions((prev) => ({ ...prev, ...newSessions }));
         }
       } catch {}
     };
 
     if (!cancelled) pollLiveSessions();
-    const interval = setInterval(() => { if (!cancelled) pollLiveSessions(); }, 30_000);
+    const interval = setInterval(() => { if (!cancelled) pollLiveSessions(); }, 20_000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [isAuthenticated]);
-
-  // Poll for matching sessions every 12s (no attempt limit)
-  useEffect(() => {
-    let cancelled = false;
-
-    const tryMatch = async () => {
-      if (cancelled) return;
-      try {
-        const res = await fetch(`${BASE}/api/vava/session`, { method: "POST" });
-        const data = await res.json() as {
-          success: boolean; channel?: string; token?: string; uid?: number; peerId?: number | null; waiting?: boolean; noCoins?: boolean;
-        };
-        if (data.success && data.channel) {
-          handleLiveSession({ channel: data.channel, token: data.token ?? null, uid: data.uid ?? 0, peerId: data.peerId ?? null, source: "api" });
-        }
-      } catch {}
-    };
-
-    const interval = setInterval(() => { if (!cancelled) tryMatch(); }, 12_000);
-    setTimeout(() => { if (!cancelled) tryMatch(); }, 800);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [handleLiveSession]);
 
   const fetchUsers = useCallback(async () => {
     setStatus("loading");
@@ -1003,10 +1038,24 @@ export default function FaVidCall() {
     (u) => u.countryCode === "ID" || u.country.toLowerCase().includes("indonesia") || u.countryCode === ""
   );
   const baseUsers = indonesianUsers.length > 0 ? indonesianUsers : users;
+
+  // Sort: live hosts with sessions first (sorted by viewer count), then busy, then others
+  const sortedUsers = [...baseUsers].sort((a, b) => {
+    const aHasSession = !!sessions[a.userId];
+    const bHasSession = !!sessions[b.userId];
+    if (aHasSession !== bHasSession) return aHasSession ? -1 : 1;
+    if (a.isLiveHost !== b.isLiveHost) return a.isLiveHost ? -1 : 1;
+    if (a.busy !== b.busy) return a.busy ? -1 : 1;
+    // Sort by viewer count descending
+    const av = a.viewerCount ?? 0, bv = b.viewerCount ?? 0;
+    if (av !== bv) return bv - av;
+    return 0;
+  });
+
   const effectiveUsers =
     activeTab === "Live"
-      ? baseUsers.filter((u) => u.busy || u.withVideoPass).concat(baseUsers.filter((u) => !u.busy && !u.withVideoPass))
-      : baseUsers;
+      ? sortedUsers.filter((u) => u.isLiveHost || u.busy || !!sessions[u.userId])
+      : sortedUsers;
 
   const scrollToIndex = (idx: number) => {
     const el = feedRef.current;
@@ -1103,11 +1152,15 @@ export default function FaVidCall() {
         </button>
       )}
 
-      {/* User count */}
+      {/* Live count */}
       <div className="absolute top-28 left-3 z-50 flex items-center gap-1 px-2.5 py-1 rounded-full"
         style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }}>
         <Zap size={11} color="#EE1D52" />
-        <span className="text-white/80 text-[10px] font-semibold">{effectiveUsers.length} penonton</span>
+        <span className="text-white/80 text-[10px] font-semibold">
+          {activeTab === "Live"
+            ? `${effectiveUsers.length} sedang live`
+            : `${effectiveUsers.length} host`}
+        </span>
       </div>
 
       {/* Feed */}
