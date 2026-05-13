@@ -107,14 +107,15 @@ async function tryJoinAgora(
   sessionToken: string | null,
   uid: number,
 ): Promise<"joined" | "error"> {
-  // Always use a random stealth UID so VAVA cannot track us
-  const stealthId = uid > 0 ? uid : stealthUid();
+  // If VAVA returned a specific uid, the Agora token is tied to that userId.
+  // We MUST join with that exact uid or the token will be rejected.
+  // Only fall back to stealth if no uid was provided.
+  const joinUid = uid > 0 ? uid : stealthUid();
 
-  // Strategy 1: token from VAVA live session table
+  // Strategy 1: VAVA token + matching uid (token is tied to this uid)
   const vavaToken = sessionToken && sessionToken.length > 10 ? sessionToken : null;
-  // Strategy 2: fresh token from our server (needs App Certificate)
-  const serverToken = await fetchServerToken(channel, stealthId);
-  // Strategy 3: null (some Agora apps allow audience without token)
+  // Strategy 2: fresh server-generated token for the same uid
+  const serverToken = await fetchServerToken(channel, joinUid);
 
   const tokenCandidates: (string | null)[] = [];
   if (vavaToken) tokenCandidates.push(vavaToken);
@@ -123,7 +124,7 @@ async function tryJoinAgora(
 
   for (const tok of tokenCandidates) {
     try {
-      await client.join(appId, channel, tok, stealthId);
+      await client.join(appId, channel, tok, joinUid);
       return "joined";
     } catch (e: unknown) {
       const msg = String(e).toLowerCase();

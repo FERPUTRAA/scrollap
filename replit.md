@@ -48,7 +48,9 @@ pnpm workspace monorepo. TikTok-clone UI dengan live feed dari Hot51 API (platfo
 
 - Agora App ID: `2f62afc1e7df4c71957bea05f56c8cbb`
 - VAVA WS: `wss://vbi.vervachat.com/ws?uid={userId}&token={authToken}`
-- Default authToken: `bf34649655074f18a425669faf312c60`, userId: `13910632`
+- Primary: authToken `1f3060ad97524a16824dd0154eb7b3d4`, userId `14186923`
+- Fallback: authToken `c2523245696c4610a13a049ca7278e05`, userId `13872374` (fresh from APK capture)
+- OLD (BANNED): authToken `bf34649655074f18a425669faf312c60`, userId `13910632` — UID_BANNED di Agora
 
 ## Environment Variables
 

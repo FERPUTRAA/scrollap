@@ -25,8 +25,8 @@ let CREDS = {
 };
 
 const CREDS_FALLBACK = {
-  authToken: "bf34649655074f18a425669faf312c60",
-  userId: "13910632",
+  authToken: "c2523245696c4610a13a049ca7278e05",
+  userId: "13872374",
   deviceId: "2d4b9fd3-2382-4f78-8122-8d0becdd7177",
   nimToken: "015311c51ec42a632508bb1ea93fba4b",
   valid: true,
@@ -482,26 +482,47 @@ vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
 
 // POST /api/vava/session - attempt to get Agora session via matching
 vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
+  type ConnResult = {
+    data?: { channel?: string; authToken?: string; agoraToken?: string; orderNo?: string; peerId?: number; peerUserId?: number };
+    failureResponse?: { status: number; detailedDescription: string };
+  };
+
   try {
     const ts = Date.now();
     const rand = Math.random().toString(36).substring(2, 10);
     const matchingRoundIdentifier = `${ts}_${rand}`;
 
-    const [result1, result2] = await Promise.allSettled([
-      vavaPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS),
-      vavaPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, CREDS_FALLBACK),
-    ]);
+    // Try each credential sequentially so we know WHICH credential got a session.
+    // The Agora token VAVA returns is tied to that credential's userId — we must
+    // join Agora with the same UID or the token will be rejected.
+    // Try all credentials for matching regardless of the `valid` flag —
+    // validity is checked via the recommend endpoint, but matching may still
+    // work even if the credential is blocked from recommendation APIs.
+    const credPairs: Array<typeof CREDS> = [CREDS, CREDS_FALLBACK];
+    let winResult: ConnResult | null = null;
+    let winCred: typeof CREDS | null = null;
 
-    const result = (result1.status === "fulfilled" ? result1.value : result2.status === "fulfilled" ? result2.value : null) as {
-      data?: { channel?: string; authToken?: string; agoraToken?: string; orderNo?: string; peerId?: number; peerUserId?: number };
-      failureResponse?: { status: number; detailedDescription: string };
-    };
+    for (const cred of credPairs) {
+      try {
+        const r = (await vavaPost("client/connection", { appVersion: 1, matchingRoundIdentifier }, cred)) as ConnResult;
+        const failStatus = r?.failureResponse?.status;
+        if (failStatus === 521) { cred.valid = false; continue; }
+        if (failStatus === 545) continue; // noCoins, try next
+        if (r?.data?.channel && (r?.data?.authToken || r?.data?.agoraToken)) {
+          winResult = r;
+          winCred = cred;
+          break;
+        }
+        // "waiting" response — store first waiting result and continue trying
+        if (!winResult) { winResult = r; }
+      } catch { /* network error, try next */ }
+    }
 
-    if (!result) {
+    if (!winResult) {
       return res.status(502).json({ success: false, error: "Semua koneksi gagal", waiting: true });
     }
 
-    const failStatus = result?.failureResponse?.status;
+    const failStatus = winResult?.failureResponse?.status;
     if (failStatus === 521) {
       return res.status(401).json({ success: false, needsAuth: true, error: "Sesi login berakhir" });
     }
@@ -509,16 +530,20 @@ vavaRouter.post("/vava/session", async (_req: Request, res: Response) => {
       return res.status(202).json({ success: false, waiting: true, noCoins: true, error: "Koin tidak mencukupi" });
     }
 
-    const d = result?.data;
+    const d = winResult?.data;
     if (d?.channel && (d?.authToken || d?.agoraToken)) {
+      // Return the exact userId whose credential generated this token.
+      // The frontend MUST join Agora with this uid so the token validates.
+      const uid = winCred ? Number(winCred.userId) : 0;
       return res.json({
         success: true, appId: AGORA_APP_ID,
-        channel: d.channel, token: d.authToken ?? d.agoraToken, uid: 0,
+        channel: d.channel, token: d.authToken ?? d.agoraToken,
+        uid,
         peerId: d.peerId ?? d.peerUserId ?? null, orderNo: d.orderNo ?? null,
       });
     }
 
-    return res.status(202).json({ success: false, waiting: true, error: "Menunggu pengguna tersedia", raw: result });
+    return res.status(202).json({ success: false, waiting: true, error: "Menunggu pengguna tersedia", raw: winResult });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return res.status(502).json({ success: false, error: msg });
