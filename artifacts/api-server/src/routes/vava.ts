@@ -3,6 +3,9 @@ import { fetch as undiciFetch } from "undici";
 import { createHmac } from "crypto";
 import { createConnection } from "net";
 import { connect as tlsConnect } from "tls";
+import { generateToken } from "../lib/agora-token.js";
+
+const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE ?? "";
 
 const vavaRouter = Router();
 
@@ -603,7 +606,8 @@ function extractAgoraCredentials(obj: unknown): { channel: string; token: string
   if (!obj || typeof obj !== "object") return null;
   const o = obj as Record<string, unknown>;
   if (typeof o.channel === "string" && o.channel.length > 0) {
-    const token = (o.authToken ?? o.token ?? o.agoraToken ?? o.chatToken) as string | undefined;
+    // Prefer agoraToken (real Agora RTC token) over authToken (VAVA internal token)
+    const token = (o.agoraToken ?? o.authToken ?? o.token ?? o.chatToken) as string | undefined;
     if (typeof token === "string" && token.length > 0) return { channel: o.channel, token };
   }
   for (const v of Object.values(o)) {
@@ -706,7 +710,19 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
                   send("ws_message", { eventType, raw: text.slice(0, 300) });
                   const creds = extractAgoraCredentials(msg);
                   if (creds) {
-                    send("agora_session", { appId: AGORA_APP_ID, channel: creds.channel, token: creds.token, uid: parseInt(activeCred.userId, 10), eventType });
+                    // Generate our own server-side token (always valid with our App Certificate).
+                    // Use uid=0 so Agora assigns a random anonymous viewer UID.
+                    const ourToken = generateToken(AGORA_APP_ID, AGORA_APP_CERTIFICATE, creds.channel, 0);
+                    // Fall back to VAVA-provided token if we can't generate one
+                    const finalToken = ourToken ?? creds.token;
+                    send("agora_session", {
+                      appId: AGORA_APP_ID,
+                      channel: creds.channel,
+                      token: finalToken,
+                      uid: 0,
+                      vavaToken: creds.token,
+                      eventType,
+                    });
                   }
                 } catch {
                   send("ws_raw", { text: text.slice(0, 200) });

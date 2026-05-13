@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { fetch as undiciFetch } from "undici";
-import { createHmac, createHash } from "crypto";
+import { buildTokenV2, buildTokenV1 } from "../lib/agora-token.js";
 
 const agoraRouter = Router();
 
@@ -8,136 +8,6 @@ const AGORA_APP_ID = process.env.AGORA_APP_ID ?? "2f62afc1e7df4c71957bea05f56c8c
 const AGORA_APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE ?? "";
 const AGORA_CUSTOMER_ID = process.env.AGORA_CUSTOMER_ID ?? "";
 const AGORA_CUSTOMER_SECRET = process.env.AGORA_CUSTOMER_SECRET ?? "";
-
-// ─── Agora Token V2 Builder (AccessToken2 / "007" prefix) ─────────────────────
-function packUInt16LE(v: number): Buffer {
-  const b = Buffer.alloc(2); b.writeUInt16LE(v & 0xffff); return b;
-}
-function packUInt32LE(v: number): Buffer {
-  const b = Buffer.alloc(4); b.writeUInt32LE(v >>> 0); return b;
-}
-function packBytes(buf: Buffer): Buffer {
-  return Buffer.concat([packUInt16LE(buf.length), buf]);
-}
-function packString(s: string): Buffer {
-  return packBytes(Buffer.from(s, "utf8"));
-}
-
-function buildAgoraTokenV2(
-  appId: string,
-  appCertificate: string,
-  channelName: string,
-  uid: number | string,
-  tokenExpirySec = 86400,
-): string {
-  const uidStr = uid === 0 || uid === "0" ? "" : String(uid);
-  const now = Math.floor(Date.now() / 1000);
-  const salt = (Math.random() * 0xffffffff) >>> 0;
-  const expire = now + tokenExpirySec;
-
-  // Privilege 1 = JoinChannel (always granted for audience)
-  const privileges: [number, number][] = [[1, expire]];
-  const privBuf = Buffer.concat([
-    packUInt16LE(privileges.length),
-    ...privileges.flatMap(([k, v]) => [packUInt16LE(k), packUInt32LE(v)]),
-  ]);
-
-  // Message: salt + issueTs + expireTs + privileges
-  const message = Buffer.concat([
-    packUInt32LE(salt),
-    packUInt32LE(now),
-    packUInt32LE(expire),
-    privBuf,
-  ]);
-
-  // Signing input: appId + channelName + uidStr + message
-  const sigInput = Buffer.concat([
-    Buffer.from(appId, "utf8"),
-    Buffer.from(channelName, "utf8"),
-    Buffer.from(uidStr, "utf8"),
-    message,
-  ]);
-
-  const signature = createHmac("sha256", Buffer.from(appCertificate, "utf8"))
-    .update(sigInput)
-    .digest();
-
-  // Content = signature(32 bytes) + message
-  const content = Buffer.concat([signature, message]);
-
-  return "007" + content.toString("base64");
-}
-
-// ─── Agora Token V1 Builder (AccessToken / "006" prefix) ────────────────────
-// CRC32 table
-const CRC32_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[i] = c;
-  }
-  return t;
-})();
-
-function crc32(str: string): number {
-  let crc = 0xffffffff;
-  for (const b of Buffer.from(str, "utf8")) {
-    crc = CRC32_TABLE[(crc ^ b) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function buildAgoraTokenV1(
-  appId: string,
-  appCertificate: string,
-  channelName: string,
-  uid: number,
-  tokenExpirySec = 86400,
-): string {
-  const VERSION = "006";
-  const uidStr = uid === 0 ? "" : String(uid);
-  const now = Math.floor(Date.now() / 1000);
-  const salt = (Math.random() * 0xffffffff) >>> 0;
-  const ts = now + tokenExpirySec;
-
-  // Privileges: 1=JoinChannel, 2=PubAudio, 3=PubVideo, 4=PubData
-  const privileges: [number, number][] = [
-    [1, ts], // JoinChannel
-  ];
-
-  const privBuf = Buffer.concat([
-    packUInt16LE(privileges.length),
-    ...privileges.flatMap(([k, v]) => [packUInt16LE(k), packUInt32LE(v)]),
-  ]);
-
-  const message = Buffer.concat([
-    packUInt32LE(salt),
-    packUInt32LE(ts),
-    privBuf,
-  ]);
-
-  // Sign: VERSION + appId + ts + salt + message
-  const sigInput = Buffer.concat([
-    Buffer.from(VERSION + appId, "utf8"),
-    packUInt32LE(ts),
-    packUInt32LE(salt),
-    message,
-  ]);
-
-  const signature = createHmac("sha256", Buffer.from(appCertificate, "utf8"))
-    .update(sigInput)
-    .digest();
-
-  const content = Buffer.concat([
-    packBytes(signature),
-    packUInt32LE(crc32(channelName)),
-    packUInt32LE(crc32(uidStr)),
-    message,
-  ]);
-
-  return VERSION + appId + content.toString("base64");
-}
 
 // ─── GET /api/agora/config ───────────────────────────────────────────────────
 agoraRouter.get("/agora/config", (_req: Request, res: Response) => {
@@ -169,8 +39,8 @@ agoraRouter.get("/agora/token", (req: Request, res: Response) => {
     const expiryNum = parseInt(expiry, 10) || 86400;
 
     // Try Token V2 first (newer format), V1 as fallback
-    const tokenV2 = buildAgoraTokenV2(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel, uidNum, expiryNum);
-    const tokenV1 = buildAgoraTokenV1(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel, uidNum, expiryNum);
+    const tokenV2 = buildTokenV2(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel, uidNum, expiryNum);
+    const tokenV1 = buildTokenV1(AGORA_APP_ID, AGORA_APP_CERTIFICATE, channel, uidNum, expiryNum);
 
     return res.json({
       success: true,
