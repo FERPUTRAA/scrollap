@@ -65,12 +65,23 @@ interface VavaUser {
 
 interface AgoraSession {
   channel: string;
-  token: string | null;       // primary token (server cert-signed, uid=0)
+  token: string | null;        // primary token (server cert-signed, uid=0)
   serverToken?: string | null; // server cert-signed token (uid=0)
   uid: number;
   peerId: number | null;
   source?: "ws" | "api" | "live_table" | "match";
   isPrivate?: boolean;
+}
+
+// P2P call session captured from VAVA WebSocket relay
+interface CallSession {
+  channel: string;
+  token: string | null;        // server cert-signed (uid=0) preferred
+  serverToken: string | null;
+  vavaToken: string | null;
+  eventType: string;
+  ageSeconds: number;
+  capturedAt: number;
 }
 
 type StreamState = "idle" | "connecting" | "connected" | "no_stream" | "error";
@@ -186,7 +197,14 @@ function playAudioViaSpeaker(track: IRemoteAudioTrack, audioElRef: React.Mutable
 }
 
 // ─── Agora viewer hook ────────────────────────────────────────────────────────
-function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null, onExpired?: () => void) {
+// clientMode "live" = broadcast audience (for live streams)
+// clientMode "rtc"  = communication mode viewer (for P2P calls — join without publishing)
+function useAgoraViewer(
+  session: AgoraSession | null,
+  videoEl: HTMLDivElement | null,
+  onExpired?: () => void,
+  clientMode: "live" | "rtc" = "live",
+) {
   const clientRef = useRef<IAgoraRTCClient | null>(null);
   const remoteVideoRef = useRef<IRemoteVideoTrack | null>(null);
   const remoteAudioRef = useRef<IRemoteAudioTrack | null>(null);
@@ -291,10 +309,13 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
       setAutoplayBlocked(false);
       setRetryIn(0);
 
-      const client = AgoraRTC.createClient({ mode: "live", codec: "h264" });
+      const client = AgoraRTC.createClient({ mode: clientMode, codec: "h264" });
       clientRef.current = client;
-      try { await client.setClientRole("audience", { level: 2 }); } catch {
-        await client.setClientRole("audience");
+      // In "live" mode: set audience role. In "rtc" mode: all are hosts — just don't publish.
+      if (clientMode === "live") {
+        try { await client.setClientRole("audience", { level: 2 }); } catch {
+          await client.setClientRole("audience");
+        }
       }
 
       AgoraRTC.onAutoplayFailed = () => { setAutoplayBlocked(true); };
@@ -939,18 +960,197 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
   );
 });
 
+// ─── Call Card — spectator view of P2P VAVA video calls ──────────────────────
+interface CallCardProps {
+  call: CallSession;
+  index: number;
+  isActive: boolean;
+  onExpired: () => void;
+}
+
+const CALL_GRADIENTS = [
+  "linear-gradient(160deg,#0a1628 0%,#0e2a4a 50%,#0d3b6e 100%)",
+  "linear-gradient(160deg,#0d1b2a 0%,#1a3a5c 50%,#0f2840 100%)",
+  "linear-gradient(160deg,#071926 0%,#0c2d4a 50%,#163d5e 100%)",
+  "linear-gradient(160deg,#0f1923 0%,#122233 50%,#0e3048 100%)",
+];
+
+const CallCard = memo(function CallCard({ call, index, isActive, onExpired }: CallCardProps) {
+  const videoContainerRef = useRef<HTMLDivElement>(null);
+  const [videoEl, setVideoEl] = useState<HTMLDivElement | null>(null);
+
+  // Convert CallSession → AgoraSession for the viewer hook
+  const session: AgoraSession | null = isActive ? {
+    channel: call.channel,
+    token: call.token,
+    serverToken: call.serverToken,
+    uid: 0,
+    peerId: null,
+    source: "ws",
+  } : null;
+
+  // Use "rtc" mode — P2P calls use Agora communication mode, not live mode.
+  // In rtc mode we join without publishing any tracks → pure spectator.
+  const { streamState, muted, toggleMute, autoplayBlocked, unblockAutoplay } =
+    useAgoraViewer(session, videoEl, isActive ? onExpired : undefined, "rtc");
+
+  useEffect(() => {
+    if (videoContainerRef.current) setVideoEl(videoContainerRef.current);
+  }, []);
+
+  const isStreaming = streamState === "connected";
+  const isConnecting = streamState === "connecting";
+  const bg = CALL_GRADIENTS[index % CALL_GRADIENTS.length];
+
+  // Format age — e.g. "2m lalu", "45d lalu"
+  const fmtAge = (sec: number) => {
+    if (sec < 60) return `${sec}d lalu`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m lalu`;
+    return `${Math.floor(sec / 3600)}j lalu`;
+  };
+
+  // Shorten channel name for display
+  const shortChannel = call.channel.length > 20
+    ? `${call.channel.slice(0, 8)}…${call.channel.slice(-8)}`
+    : call.channel;
+
+  return (
+    <div className="relative w-full h-full flex flex-col overflow-hidden"
+      style={{ background: bg }}>
+
+      {/* Video render target */}
+      <div ref={videoContainerRef} className="absolute inset-0"
+        style={{ zIndex: 10, background: "transparent" }} />
+
+      {/* Video overlay gradient */}
+      {isStreaming && (
+        <div className="absolute inset-0 pointer-events-none"
+          style={{ background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.15) 60%, transparent 100%)", zIndex: 11 }} />
+      )}
+
+      {/* Top badge */}
+      <div className="absolute top-[88px] left-4 flex items-center gap-2" style={{ zIndex: 30 }}>
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full"
+          style={{ background: "rgba(6,182,212,0.85)", backdropFilter: "blur(6px)" }}>
+          <span className="text-[10px] font-black text-white tracking-wider">📞 VIDEO CALL</span>
+        </div>
+        <div className="px-2 py-1 rounded-full text-[9px] font-bold text-white/80"
+          style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(6px)" }}>
+          {fmtAge(call.ageSeconds)}
+        </div>
+      </div>
+
+      {/* Right action buttons */}
+      <div className="absolute right-3 flex flex-col items-center gap-5" style={{ bottom: "80px", zIndex: 30 }}>
+        <button onClick={toggleMute}
+          className="flex flex-col items-center gap-0.5">
+          <div className="w-11 h-11 rounded-full flex items-center justify-center"
+            style={{ background: "rgba(255,255,255,0.15)", backdropFilter: "blur(8px)" }}>
+            {muted ? <VolumeX size={20} color="white" /> : <Volume2 size={20} color="white" />}
+          </div>
+          <span className="text-white/70 text-[9px]">{muted ? "Bisu" : "Suara"}</span>
+        </button>
+        <button onClick={onExpired}
+          className="flex flex-col items-center gap-0.5">
+          <div className="w-11 h-11 rounded-full flex items-center justify-center"
+            style={{ background: "rgba(255,255,255,0.15)", backdropFilter: "blur(8px)" }}>
+            <RefreshCw size={20} color="white" />
+          </div>
+          <span className="text-white/70 text-[9px]">Berikutnya</span>
+        </button>
+      </div>
+
+      {/* Connecting spinner */}
+      <AnimatePresence>
+        {isConnecting && (
+          <motion.div className="absolute inset-0 flex flex-col items-center justify-center gap-3"
+            style={{ zIndex: 25 }} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <div className="w-14 h-14 rounded-full border-4 border-cyan-500/30 border-t-cyan-400 animate-spin" />
+            <p className="text-cyan-300 text-sm font-medium">Bergabung ke panggilan…</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Autoplay blocked */}
+      {autoplayBlocked && isActive && (
+        <motion.div className="absolute inset-0 flex items-center justify-center cursor-pointer"
+          style={{ zIndex: 35 }} initial={{ opacity: 0 }} animate={{ opacity: 1 }} onClick={unblockAutoplay}>
+          <div className="flex flex-col items-center gap-3 px-6 py-4 rounded-2xl"
+            style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(10px)", border: "1px solid rgba(6,182,212,0.3)" }}>
+            <div className="w-14 h-14 rounded-full flex items-center justify-center"
+              style={{ background: "rgba(6,182,212,0.9)" }}>
+              <Volume2 size={28} color="white" />
+            </div>
+            <p className="text-white font-bold text-sm">Tap untuk Play</p>
+          </div>
+        </motion.div>
+      )}
+
+      {/* No stream / waiting state */}
+      {streamState === "no_stream" && !isConnecting && isActive && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4" style={{ zIndex: 20 }}>
+          {/* Two-person call illustration */}
+          <div className="flex items-center gap-4">
+            {[0, 1].map((i) => (
+              <div key={i} className="w-16 h-16 rounded-full flex items-center justify-center"
+                style={{ background: "rgba(6,182,212,0.15)", border: "2px solid rgba(6,182,212,0.35)" }}>
+                <Users size={28} color="rgba(6,182,212,0.8)" />
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-col items-center gap-1">
+            <p className="text-white/90 text-sm font-semibold">Menunggu penelepon…</p>
+            <p className="text-white/40 text-xs">Sedang mencoba bergabung ke sesi</p>
+          </div>
+        </div>
+      )}
+
+      {/* Error state */}
+      {streamState === "error" && isActive && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3" style={{ zIndex: 20 }}>
+          <VideoOff size={40} color="rgba(6,182,212,0.5)" />
+          <p className="text-white/60 text-sm">Sesi telah berakhir</p>
+          <button onClick={onExpired}
+            className="px-4 py-2 rounded-full text-white text-xs font-bold flex items-center gap-1.5"
+            style={{ background: "rgba(6,182,212,0.8)" }}>
+            <RefreshCw size={12} /> Cari Panggilan Lain
+          </button>
+        </div>
+      )}
+
+      {/* Bottom info */}
+      <div className="absolute bottom-[64px] left-4 right-20" style={{ zIndex: 30 }}>
+        <div className="flex items-center gap-2 mb-1">
+          <Radio size={12} color="rgba(6,182,212,0.9)" />
+          <p className="text-white/90 text-sm font-bold">Sesi Video Call Aktif</p>
+        </div>
+        <p className="text-white/50 text-[10px] font-mono mb-1">{shortChannel}</p>
+        <div className="flex items-center gap-1.5">
+          {isStreaming
+            ? <><span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" /><span className="text-cyan-400 text-xs font-semibold">Menonton Live</span></>
+            : <><Wifi size={10} color="rgba(255,255,255,0.4)" /><span className="text-white/40 text-xs">Bergabung ke channel…</span></>
+          }
+        </div>
+      </div>
+    </div>
+  );
+});
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 type PageStatus = "loading" | "ok" | "error" | "need_auth";
 
 export default function FaVidCall() {
-  const [activeTab, setActiveTab] = useState<"Semua" | "Live">("Semua");
+  const [activeTab, setActiveTab] = useState<"Semua" | "Live" | "Panggilan">("Semua");
   const [users, setUsers] = useState<VavaUser[]>([]);
   const [status, setStatus] = useState<PageStatus>("loading");
   const [errorMsg, setErrorMsg] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [sessions, setSessions] = useState<Record<number, AgoraSession>>({});
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(true);
+  const [callSessions, setCallSessions] = useState<CallSession[]>([]);
+  const [activeCallIndex, setActiveCallIndex] = useState(0);
   const feedRef = useRef<HTMLDivElement>(null);
+  const callFeedRef = useRef<HTMLDivElement>(null);
 
   // Refs to track latest state inside async callbacks/intervals (avoids stale closures)
   const activeIndexRef = useRef(0);
@@ -1014,6 +1214,39 @@ export default function FaVidCall() {
     // Trigger immediate poll instead of waiting up to 20s
     pollNowRef.current?.();
   }, []);
+
+  // ── Poll P2P call sessions (always running — feeds the Panggilan tab) ────────
+  useEffect(() => {
+    let cancelled = false;
+    const pollCallSessions = async () => {
+      try {
+        const res = await fetch(`${BASE}/api/vava/call-sessions`);
+        const data = await res.json() as { success: boolean; sessions: CallSession[] };
+        if (!cancelled && data.success) setCallSessions(data.sessions ?? []);
+      } catch {}
+    };
+    pollCallSessions();
+    const id = setInterval(pollCallSessions, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const handleCallExpired = useCallback((channel: string) => {
+    setCallSessions((prev) => prev.filter((s) => s.channel !== channel));
+  }, []);
+
+  const scrollCallToIndex = (idx: number) => {
+    const el = callFeedRef.current;
+    if (!el) return;
+    el.scrollTo({ top: idx * el.clientHeight, behavior: "smooth" });
+    setActiveCallIndex(idx);
+  };
+
+  const handleCallScroll = useCallback(() => {
+    const el = callFeedRef.current;
+    if (!el) return;
+    const idx = Math.round(el.scrollTop / el.clientHeight);
+    if (idx !== activeCallIndex) setActiveCallIndex(idx);
+  }, [activeCallIndex]);
 
   // ── Matching poll REMOVED ──────────────────────────────────────────────────
   // Auto-calling /vava/session every 10s was the root cause of "terlempar":
@@ -1242,14 +1475,30 @@ export default function FaVidCall() {
         style={{ background: "linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, transparent 100%)" }}>
         <div className="flex items-center gap-1 pointer-events-auto"
           style={{ background: "rgba(255,255,255,0.1)", borderRadius: 20, padding: "3px 4px", backdropFilter: "blur(6px)" }}>
-          {(["Semua", "Live"] as const).map((tab) => (
-            <button key={tab}
-              className="px-4 py-1.5 rounded-2xl text-xs font-bold transition-all"
-              style={{ background: activeTab === tab ? "rgba(238,29,82,0.9)" : "transparent", color: "white" }}
-              onClick={() => { setActiveTab(tab); setActiveIndex(0); scrollToIndex(0); }}>
-              {tab === "Live" ? "🔴 Sedang Live" : tab}
-            </button>
-          ))}
+          <button
+            className="px-4 py-1.5 rounded-2xl text-xs font-bold transition-all"
+            style={{ background: activeTab === "Semua" ? "rgba(238,29,82,0.9)" : "transparent", color: "white" }}
+            onClick={() => { setActiveTab("Semua"); setActiveIndex(0); scrollToIndex(0); }}>
+            Semua
+          </button>
+          <button
+            className="px-4 py-1.5 rounded-2xl text-xs font-bold transition-all"
+            style={{ background: activeTab === "Live" ? "rgba(238,29,82,0.9)" : "transparent", color: "white" }}
+            onClick={() => { setActiveTab("Live"); setActiveIndex(0); scrollToIndex(0); }}>
+            🔴 Sedang Live
+          </button>
+          <button
+            className="relative px-4 py-1.5 rounded-2xl text-xs font-bold transition-all"
+            style={{ background: activeTab === "Panggilan" ? "rgba(6,182,212,0.9)" : "transparent", color: "white" }}
+            onClick={() => { setActiveTab("Panggilan"); setActiveCallIndex(0); }}>
+            📞 Video Call
+            {callSessions.length > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-black"
+                style={{ background: "rgba(6,182,212,0.9)", color: "white" }}>
+                {callSessions.length}
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Auth indicator */}
@@ -1263,15 +1512,15 @@ export default function FaVidCall() {
         )}
       </div>
 
-      {/* Nav arrows */}
-      {activeIndex > 0 && (
+      {/* Nav arrows — user feed */}
+      {activeTab !== "Panggilan" && activeIndex > 0 && (
         <button className="absolute top-28 right-3 z-50 w-8 h-8 rounded-full flex items-center justify-center"
           style={{ background: "rgba(255,255,255,0.15)", backdropFilter: "blur(4px)" }}
           onClick={() => scrollToIndex(activeIndex - 1)}>
           <ChevronUp size={18} color="white" />
         </button>
       )}
-      {activeIndex < effectiveUsers.length - 1 && (
+      {activeTab !== "Panggilan" && activeIndex < effectiveUsers.length - 1 && (
         <button className="absolute bottom-24 right-3 z-50 w-8 h-8 rounded-full flex items-center justify-center"
           style={{ background: "rgba(255,255,255,0.15)", backdropFilter: "blur(4px)" }}
           onClick={() => scrollToIndex(activeIndex + 1)}>
@@ -1279,50 +1528,117 @@ export default function FaVidCall() {
         </button>
       )}
 
-      {/* Live count */}
+      {/* Nav arrows — call feed */}
+      {activeTab === "Panggilan" && activeCallIndex > 0 && (
+        <button className="absolute top-28 right-3 z-50 w-8 h-8 rounded-full flex items-center justify-center"
+          style={{ background: "rgba(6,182,212,0.25)", backdropFilter: "blur(4px)" }}
+          onClick={() => scrollCallToIndex(activeCallIndex - 1)}>
+          <ChevronUp size={18} color="white" />
+        </button>
+      )}
+      {activeTab === "Panggilan" && activeCallIndex < callSessions.length - 1 && (
+        <button className="absolute bottom-24 right-3 z-50 w-8 h-8 rounded-full flex items-center justify-center"
+          style={{ background: "rgba(6,182,212,0.25)", backdropFilter: "blur(4px)" }}
+          onClick={() => scrollCallToIndex(activeCallIndex + 1)}>
+          <ChevronDown size={18} color="white" />
+        </button>
+      )}
+
+      {/* Count badge */}
       <div className="absolute top-28 left-3 z-50 flex items-center gap-1 px-2.5 py-1 rounded-full"
         style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(6px)" }}>
-        <Zap size={11} color="#EE1D52" />
-        <span className="text-white/80 text-[10px] font-semibold">
-          {activeTab === "Live"
-            ? `${effectiveUsers.length} sedang live`
-            : `${effectiveUsers.length} host`}
-        </span>
+        {activeTab === "Panggilan"
+          ? <><Radio size={11} color="rgb(6,182,212)" /><span className="text-cyan-400 text-[10px] font-semibold">{callSessions.length} panggilan aktif</span></>
+          : <><Zap size={11} color="#EE1D52" /><span className="text-white/80 text-[10px] font-semibold">{activeTab === "Live" ? `${effectiveUsers.length} sedang live` : `${effectiveUsers.length} host`}</span></>
+        }
       </div>
 
-      {/* Feed */}
-      <div ref={feedRef}
-        className="flex-1 overflow-y-scroll"
-        style={{ scrollSnapType: "y mandatory", scrollbarWidth: "none" }}
-        onScroll={handleScroll}>
-        <style>{`.feed-scroll::-webkit-scrollbar{display:none}`}</style>
-        {effectiveUsers.map((user, i) => {
-          const session = sessions[user.userId] ?? null;
-          return (
-            <div key={user.userId} className="relative w-full"
-              style={{ height: "100svh", scrollSnapAlign: "start", scrollSnapStop: "always" }}>
-              <LiveCard user={user} index={i} isActive={i === activeIndex} session={session} wsStatus={wsStatus}
-                onSessionExpired={() => handleSessionExpired(user.userId)} />
-              {/* Dot indicator */}
-              <div className="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-20"
-                style={{ display: effectiveUsers.length <= 10 ? "flex" : "none" }}>
-                {effectiveUsers.slice(Math.max(0, i - 2), Math.min(effectiveUsers.length, i + 3)).map((_, di) => {
-                  const realIdx = Math.max(0, i - 2) + di;
-                  return (
-                    <div key={realIdx} className="w-1 rounded-full transition-all"
-                      style={{ height: realIdx === activeIndex ? 20 : 6, background: realIdx === activeIndex ? "white" : "rgba(255,255,255,0.3)" }} />
-                  );
-                })}
+      {/* User feed (Semua / Live tabs) */}
+      {activeTab !== "Panggilan" && (
+        <div ref={feedRef}
+          className="flex-1 overflow-y-scroll"
+          style={{ scrollSnapType: "y mandatory", scrollbarWidth: "none" }}
+          onScroll={handleScroll}>
+          <style>{`.feed-scroll::-webkit-scrollbar{display:none}`}</style>
+          {effectiveUsers.map((user, i) => {
+            const session = sessions[user.userId] ?? null;
+            return (
+              <div key={user.userId} className="relative w-full"
+                style={{ height: "100svh", scrollSnapAlign: "start", scrollSnapStop: "always" }}>
+                <LiveCard user={user} index={i} isActive={i === activeIndex} session={session} wsStatus={wsStatus}
+                  onSessionExpired={() => handleSessionExpired(user.userId)} />
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-20"
+                  style={{ display: effectiveUsers.length <= 10 ? "flex" : "none" }}>
+                  {effectiveUsers.slice(Math.max(0, i - 2), Math.min(effectiveUsers.length, i + 3)).map((_, di) => {
+                    const realIdx = Math.max(0, i - 2) + di;
+                    return (
+                      <div key={realIdx} className="w-1 rounded-full transition-all"
+                        style={{ height: realIdx === activeIndex ? 20 : 6, background: realIdx === activeIndex ? "white" : "rgba(255,255,255,0.3)" }} />
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Call feed (Panggilan tab) */}
+      {activeTab === "Panggilan" && (
+        <div ref={callFeedRef}
+          className="flex-1 overflow-y-scroll"
+          style={{ scrollSnapType: "y mandatory", scrollbarWidth: "none" }}
+          onScroll={handleCallScroll}>
+          {callSessions.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full gap-5 px-8"
+              style={{ minHeight: "100svh", background: "linear-gradient(160deg,#0a1628 0%,#0e2a4a 100%)" }}>
+              <div className="w-20 h-20 rounded-full flex items-center justify-center"
+                style={{ background: "rgba(6,182,212,0.1)", border: "2px solid rgba(6,182,212,0.25)" }}>
+                <Radio size={36} color="rgba(6,182,212,0.5)" />
+              </div>
+              <div className="text-center">
+                <p className="text-white/80 text-base font-semibold mb-1">Belum Ada Video Call Aktif</p>
+                <p className="text-white/40 text-xs leading-relaxed">
+                  Sesi video call VAVA akan muncul di sini secara otomatis saat terdeteksi.
+                  Pastikan koneksi WS aktif (indikator hijau di atas).
+                </p>
+              </div>
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full"
+                style={{ background: wsStatus === "connected" ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.08)", border: `1px solid ${wsStatus === "connected" ? "rgba(34,197,94,0.3)" : "rgba(255,255,255,0.15)"}` }}>
+                <span className={`w-2 h-2 rounded-full ${wsStatus === "connected" ? "bg-green-400 animate-pulse" : "bg-white/30"}`} />
+                <span className={`text-xs font-semibold ${wsStatus === "connected" ? "text-green-400" : "text-white/40"}`}>
+                  {wsStatus === "connected" ? "WS Terhubung — Mendengarkan sesi…" : wsStatus === "connecting" ? "WS Menghubungkan…" : "WS Tidak Aktif"}
+                </span>
               </div>
             </div>
-          );
-        })}
-      </div>
+          ) : (
+            callSessions.map((call, i) => (
+              <div key={call.channel} className="relative w-full"
+                style={{ height: "100svh", scrollSnapAlign: "start", scrollSnapStop: "always" }}>
+                <CallCard call={call} index={i} isActive={i === activeCallIndex}
+                  onExpired={() => handleCallExpired(call.channel)} />
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-20"
+                  style={{ display: callSessions.length <= 10 ? "flex" : "none" }}>
+                  {callSessions.slice(Math.max(0, i - 2), Math.min(callSessions.length, i + 3)).map((_, di) => {
+                    const realIdx = Math.max(0, i - 2) + di;
+                    return (
+                      <div key={realIdx} className="w-1 rounded-full transition-all"
+                        style={{ height: realIdx === activeCallIndex ? 20 : 6, background: realIdx === activeCallIndex ? "rgb(6,182,212)" : "rgba(6,182,212,0.3)" }} />
+                    );
+                  })}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {/* Bottom hint */}
       <div className="absolute bottom-0 left-0 right-0 z-40 flex items-center justify-center pb-6 pt-3 pointer-events-none"
         style={{ background: "linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 100%)" }}>
-        <p className="text-white/40 text-[10px] font-medium">Geser untuk melihat lebih banyak siaran</p>
+        <p className="text-white/40 text-[10px] font-medium">
+          {activeTab === "Panggilan" ? "Geser untuk melihat panggilan lain" : "Geser untuk melihat lebih banyak siaran"}
+        </p>
       </div>
     </div>
   );
