@@ -126,11 +126,41 @@ async function tryJoinAgora(
   return "error";
 }
 
+// ─── Play audio through loudspeaker via <audio> element ───────────────────────
+// Agora's track.play() uses WebAudio API → earpiece on mobile.
+// Routing through an HTMLAudioElement forces the media/music speaker.
+function playAudioViaSpeaker(track: IRemoteAudioTrack, audioElRef: React.MutableRefObject<HTMLAudioElement | null>, muted: boolean) {
+  try {
+    // Stop Agora's own internal audio player so no double audio
+    try { track.stop(); } catch {}
+
+    let el = audioElRef.current;
+    if (!el) {
+      el = document.createElement("audio");
+      el.autoplay = true;
+      el.setAttribute("playsinline", "");
+      el.setAttribute("webkit-playsinline", "");
+      // No controls, hidden element
+      el.style.cssText = "position:absolute;width:0;height:0;opacity:0;pointer-events:none;";
+      document.body.appendChild(el);
+      audioElRef.current = el;
+    }
+
+    const rawTrack = track.getMediaStreamTrack();
+    if (rawTrack) {
+      el.srcObject = new MediaStream([rawTrack]);
+      el.muted = muted;
+      el.play().catch(() => {});
+    }
+  } catch {}
+}
+
 // ─── Agora viewer hook ────────────────────────────────────────────────────────
 function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null) {
   const clientRef = useRef<IAgoraRTCClient | null>(null);
   const remoteVideoRef = useRef<IRemoteVideoTrack | null>(null);
   const remoteAudioRef = useRef<IRemoteAudioTrack | null>(null);
+  const speakerElRef = useRef<HTMLAudioElement | null>(null);
   const [streamState, setStreamState] = useState<StreamState>("idle");
   const [remoteVideo, setRemoteVideo] = useState<IRemoteVideoTrack | null>(null);
   const [muted, setMuted] = useState(false);
@@ -140,11 +170,20 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
   const pendingAudioRef = useRef<IRemoteAudioTrack | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const cleanupSpeaker = useCallback(() => {
+    if (speakerElRef.current) {
+      try { speakerElRef.current.pause(); speakerElRef.current.srcObject = null; } catch {}
+      try { speakerElRef.current.remove(); } catch {}
+      speakerElRef.current = null;
+    }
+  }, []);
+
   const cleanup = useCallback(async () => {
     const c = clientRef.current;
     if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
+    cleanupSpeaker();
     if (!c) return;
-    try { remoteVideoRef.current?.stop(); remoteAudioRef.current?.stop(); await c.leave(); } catch {}
+    try { remoteVideoRef.current?.stop(); await c.leave(); } catch {}
     clientRef.current = null;
     remoteVideoRef.current = null;
     remoteAudioRef.current = null;
@@ -152,14 +191,16 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
     setRemoteVideo(null);
     setAutoplayBlocked(false);
     setRetryIn(0);
-  }, []);
+  }, [cleanupSpeaker]);
 
   const unblockAutoplay = useCallback(() => {
     if (!autoplayBlocked) return;
-    try {
-      pendingVideoRef.current?.play(undefined as unknown as HTMLElement);
-      pendingAudioRef.current?.play();
-    } catch {}
+    try { pendingVideoRef.current?.play(undefined as unknown as HTMLElement); } catch {}
+    if (pendingAudioRef.current) {
+      playAudioViaSpeaker(pendingAudioRef.current, speakerElRef, false);
+      pendingAudioRef.current = null;
+    }
+    if (speakerElRef.current) speakerElRef.current.muted = false;
     setAutoplayBlocked(false);
     setMuted(false);
   }, [autoplayBlocked]);
@@ -199,10 +240,15 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
         if (user.hasAudio) {
           try {
             await client.subscribe(user, "audio");
-            try { user.audioTrack?.play(); } catch {
-              if (user.audioTrack) { pendingAudioRef.current = user.audioTrack; setAutoplayBlocked(true); }
+            if (!cancelled && user.audioTrack) {
+              remoteAudioRef.current = user.audioTrack;
+              try {
+                playAudioViaSpeaker(user.audioTrack, speakerElRef, muted);
+              } catch {
+                pendingAudioRef.current = user.audioTrack;
+                setAutoplayBlocked(true);
+              }
             }
-            if (!cancelled && user.audioTrack) remoteAudioRef.current = user.audioTrack;
           } catch {}
         }
       }
@@ -236,15 +282,20 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
         if (mediaType === "audio") {
           const track = user.audioTrack;
           if (track && !cancelled) {
-            try { track.play(); } catch { pendingAudioRef.current = track; setAutoplayBlocked(true); }
             remoteAudioRef.current = track;
+            try {
+              playAudioViaSpeaker(track, speakerElRef, muted);
+            } catch {
+              pendingAudioRef.current = track;
+              setAutoplayBlocked(true);
+            }
           }
         }
       });
 
       client.on("user-unpublished", (_user: IAgoraRTCRemoteUser, mediaType: "audio" | "video") => {
         if (mediaType === "video") { setRemoteVideo(null); setStreamState("no_stream"); }
-        if (mediaType === "audio") remoteAudioRef.current = null;
+        if (mediaType === "audio") { remoteAudioRef.current = null; cleanupSpeaker(); }
       });
 
       client.on("user-left", () => { if (!cancelled) setStreamState("no_stream"); });
@@ -292,12 +343,12 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
   }, [session, videoEl, cleanup]);
 
   const toggleMute = useCallback(() => {
-    const audio = remoteAudioRef.current;
-    if (audio) {
-      if (muted) audio.play();
-      else audio.stop();
-      setMuted((m) => !m);
+    const newMuted = !muted;
+    // Mute/unmute via the <audio> element (loudspeaker routing), not Agora track
+    if (speakerElRef.current) {
+      speakerElRef.current.muted = newMuted;
     }
+    setMuted(newMuted);
   }, [muted]);
 
   return { streamState, remoteVideo, muted, toggleMute, cleanup, autoplayBlocked, unblockAutoplay, retryIn };
