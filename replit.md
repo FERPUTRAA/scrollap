@@ -82,6 +82,14 @@ pnpm workspace monorepo. TikTok-clone UI dengan live feed dari Hot51 API (platfo
 3. Session OK → Agora join `uid: 0` (random, hindari UID ban)
 4. Session "noCoins" → tampilkan searching overlay, WS relay kirim session saat ada
 
+## User Preferences
+
+- Selalu gunakan prefix `rtk` untuk perintah shell. Contoh:
+  - `rtk git status` bukan `git status`
+  - `rtk git diff --stat` bukan `git diff --stat`
+  - `rtk ls` bukan `ls`
+  - `rtk cat package.json` bukan `cat package.json`
+
 ## Gotchas
 
 - Hot51 CDN geo-blocks non-Indonesian IPs → tanpa `HOT51_PROXY_URL` stream tidak bisa diputar
