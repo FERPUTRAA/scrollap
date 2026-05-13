@@ -72,6 +72,9 @@ interface AgoraSession {
   source?: "ws" | "api" | "live_table" | "match";
   isPrivate?: boolean;
 }
+const buildSessionKey = (hostUserId: number | null, channel: string): string => (
+  hostUserId !== null ? `host:${hostUserId}` : `channel:${channel}`
+);
 
 // P2P call session captured from VAVA WebSocket relay
 interface CallSession {
@@ -1145,7 +1148,7 @@ export default function FaVidCall() {
   const [status, setStatus] = useState<PageStatus>("loading");
   const [errorMsg, setErrorMsg] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  const [sessions, setSessions] = useState<Record<number, AgoraSession>>({});
+  const [sessions, setSessions] = useState<Record<string, AgoraSession>>({});
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(true);
   const [callSessions, setCallSessions] = useState<CallSession[]>([]);
   const [activeCallIndex, setActiveCallIndex] = useState(0);
@@ -1155,7 +1158,7 @@ export default function FaVidCall() {
   // Refs to track latest state inside async callbacks/intervals (avoids stale closures)
   const activeIndexRef = useRef(0);
   const usersRef = useRef<VavaUser[]>([]);
-  const sessionsRef = useRef<Record<number, AgoraSession>>({});
+  const sessionsRef = useRef<Record<string, AgoraSession>>({});
 
   useEffect(() => { activeIndexRef.current = activeIndex; }, [activeIndex]);
   useEffect(() => { usersRef.current = users; }, [users]);
@@ -1185,9 +1188,10 @@ export default function FaVidCall() {
         if (us.length > 0 && ai < us.length) {
           setSessions((prev) => {
             const userId = us[ai].userId;
+            const key = `host:${userId}`;
             // Don't overwrite an existing active session
-            if (prev[userId]) return prev;
-            return { ...prev, [userId]: s };
+            if (prev[key]) return prev;
+            return { ...prev, [key]: s };
           });
         }
         return us;
@@ -1208,7 +1212,7 @@ export default function FaVidCall() {
   const handleSessionExpired = useCallback((userId: number) => {
     setSessions((prev) => {
       const next = { ...prev };
-      delete next[userId];
+      delete next[`host:${userId}`];
       return next;
     });
     // Trigger immediate poll instead of waiting up to 20s
@@ -1248,6 +1252,13 @@ export default function FaVidCall() {
     if (idx !== activeCallIndex) setActiveCallIndex(idx);
   }, [activeCallIndex]);
 
+  useEffect(() => {
+    setActiveCallIndex((prev) => {
+      if (callSessions.length === 0) return 0;
+      return Math.min(prev, callSessions.length - 1);
+    });
+  }, [callSessions]);
+
   // ── Matching poll REMOVED ──────────────────────────────────────────────────
   // Auto-calling /vava/session every 10s was the root cause of "terlempar":
   // - It creates real VAVA video call sessions (burns coins, not for watching live)
@@ -1283,10 +1294,11 @@ export default function FaVidCall() {
         // VAVA tokens are signed for a specific credential UID — joining with
         // uid=0 or a different UID causes "UID_BANNED" / token rejection kicks.
         // Our certificate-signed token is valid for uid=0 (anonymous viewer).
-        const newSessions: Record<number, AgoraSession> = {};
+        const newSessions: Record<string, AgoraSession> = {};
         data.sessions.forEach((s) => {
-          if (s.hostUserId && s.channel) {
-            newSessions[s.hostUserId] = {
+          if (s.channel) {
+            const key = buildSessionKey(s.hostUserId, s.channel);
+            newSessions[key] = {
               channel: s.channel,
               token: s.serverToken ?? s.token,  // server cert-signed (uid=0) preferred
               serverToken: s.serverToken ?? null,
@@ -1302,10 +1314,10 @@ export default function FaVidCall() {
         setUsers((us) => {
           const seenIds = new Set(us.map((u) => u.userId));
           const newHosts: VavaUser[] = data.sessions
-            .filter((s) => s.hostUserId && !seenIds.has(s.hostUserId) && s.channel)
+            .filter((s) => s.channel)
             .map((s) => ({
-              userId: s.hostUserId!,
-              displayName: s.hostDisplayName || "Host",
+              userId: s.hostUserId ?? -Math.abs(Array.from(s.channel).reduce((acc, ch) => ((acc * 31) + ch.charCodeAt(0)) | 0, 7)),
+              displayName: s.hostDisplayName || (s.hostUserId ? "Host" : `Host ${s.channel.slice(0, 6)}`),
               profilePictureUrl: s.hostProfilePicture ?? "",
               age: null, online: true, busy: true, verified: false,
               callCost: 0, country: "Indonesia", countryCode: "ID",
@@ -1313,7 +1325,8 @@ export default function FaVidCall() {
               starSign: null, astrologicalIconUrl: null, hobbies: [],
               withVideoPass: s.isPrivate ?? false,
               viewerCount: s.viewerCount, isLiveHost: true,
-            }));
+            }))
+            .filter((u) => !seenIds.has(u.userId));
 
           // Update viewerCount and live status for existing hosts
           const updated = us.map((u) => {
@@ -1328,16 +1341,12 @@ export default function FaVidCall() {
         // Remove sessions for hosts no longer in the live table (they went offline).
         // Also add sessions for new live hosts, but never overwrite an active session.
         setSessions((prev) => {
-          const merged: Record<number, AgoraSession> = {};
+          const merged: Record<string, AgoraSession> = {};
           for (const [id, s] of Object.entries(prev)) {
-            const hostId = Number(id);
-            // Keep the session ONLY if this host is still in the live table
-            if (newSessions[hostId]) merged[hostId] = s;
+            if (newSessions[id]) merged[id] = s;
           }
           for (const [id, s] of Object.entries(newSessions)) {
-            const hostId = Number(id);
-            // Add new sessions for hosts not already active
-            if (!merged[hostId]) merged[hostId] = s;
+            if (!merged[id]) merged[id] = s;
           }
           return merged;
         });
@@ -1401,8 +1410,8 @@ export default function FaVidCall() {
 
   // Sort: live hosts with sessions first (sorted by viewer count), then busy, then others
   const sortedUsers = [...baseUsers].sort((a, b) => {
-    const aHasSession = !!sessions[a.userId];
-    const bHasSession = !!sessions[b.userId];
+    const aHasSession = !!sessions[`host:${a.userId}`];
+    const bHasSession = !!sessions[`host:${b.userId}`];
     if (aHasSession !== bHasSession) return aHasSession ? -1 : 1;
     if (a.isLiveHost !== b.isLiveHost) return a.isLiveHost ? -1 : 1;
     if (a.busy !== b.busy) return a.busy ? -1 : 1;
@@ -1414,7 +1423,7 @@ export default function FaVidCall() {
 
   const effectiveUsers =
     activeTab === "Live"
-      ? sortedUsers.filter((u) => u.isLiveHost || !!sessions[u.userId])
+      ? sortedUsers.filter((u) => u.isLiveHost || !!sessions[`host:${u.userId}`])
       : sortedUsers;
 
   const scrollToIndex = (idx: number) => {
@@ -1561,7 +1570,7 @@ export default function FaVidCall() {
           onScroll={handleScroll}>
           <style>{`.feed-scroll::-webkit-scrollbar{display:none}`}</style>
           {effectiveUsers.map((user, i) => {
-            const session = sessions[user.userId] ?? null;
+            const session = sessions[`host:${user.userId}`] ?? null;
             return (
               <div key={user.userId} className="relative w-full"
                 style={{ height: "100svh", scrollSnapAlign: "start", scrollSnapStop: "always" }}>
