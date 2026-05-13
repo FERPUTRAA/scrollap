@@ -1279,10 +1279,33 @@ export default function FaVidCall() {
   // - Gets user kicked when matching disconnects or token expires
   // - live/session/table/v2 (polled below) is the correct source for live streams
 
-  // Poll live sessions from VAVA live session table every 20s
-  // STEALTH: only reads the table, never creates a matching session
-  // PRIMARY source for all live streams — uses server-signed token (uid=0) so
-  // we never need to match UIDs with VAVA tokens (which causes UID_BANNED kicks)
+  // ── Session pool — available live sessions not yet assigned to any card ────────
+  // When live table returns sessions for users NOT in the recommend list,
+  // we keep them in a pool and assign them to whichever card is currently active.
+  const sessionPoolRef = useRef<AgoraSession[]>([]);
+
+  // Assign a pooled session to the currently active card if it has no session.
+  const assignPooledSession = useCallback(() => {
+    if (sessionPoolRef.current.length === 0) return;
+    setActiveIndex((ai) => {
+      setUsers((us) => {
+        if (us.length === 0 || ai >= us.length) return us;
+        setSessions((prev) => {
+          const userId = us[ai].userId;
+          if (prev[userId]) return prev; // card already has a session
+          const next = sessionPoolRef.current.shift();
+          if (!next) return prev;
+          return { ...prev, [userId]: next };
+        });
+        return us;
+      });
+      return ai;
+    });
+  }, []);
+
+  // Poll live sessions from VAVA live session table every 10s
+  // STEALTH: only reads the table, never creates a matching session.
+  // PRIMARY source for all live streams — uses server-signed token (uid=0).
   useEffect(() => {
     let cancelled = false;
 
@@ -1313,17 +1336,35 @@ export default function FaVidCall() {
           if (s.hostUserId && s.channel) {
             newSessions[s.hostUserId] = {
               channel: s.channel,
-              token: s.serverToken ?? s.token,  // server cert-signed (uid=0) preferred
+              token: s.serverToken ?? s.token,
               serverToken: s.serverToken ?? null,
-              vavaToken: s.token ?? null,        // VAVA original — fallback with credentialUid
+              vavaToken: s.token ?? null,
               credentialUid: s.credentialUid ?? 0,
-              uid: 0,                            // always start as anonymous viewer
+              uid: 0,
               peerId: null,
               source: "live_table",
               isPrivate: s.isPrivate ?? false,
             };
           }
         });
+
+        // Sessions without a matching hostUserId → go into the session pool.
+        // These get opportunistically assigned to the active card.
+        const poolSessions: AgoraSession[] = data.sessions
+          .filter((s) => !s.hostUserId && s.channel)
+          .map((s) => ({
+            channel: s.channel,
+            token: s.serverToken ?? s.token,
+            serverToken: s.serverToken ?? null,
+            vavaToken: s.token ?? null,
+            credentialUid: s.credentialUid ?? 0,
+            uid: 0, peerId: null, source: "live_table" as const,
+            isPrivate: s.isPrivate ?? false,
+          }));
+        if (poolSessions.length > 0) {
+          sessionPoolRef.current = [...sessionPoolRef.current, ...poolSessions];
+          assignPooledSession();
+        }
 
         // Merge live hosts into users list if not already present
         setUsers((us) => {
@@ -1358,12 +1399,10 @@ export default function FaVidCall() {
           const merged: Record<number, AgoraSession> = {};
           for (const [id, s] of Object.entries(prev)) {
             const hostId = Number(id);
-            // Keep the session ONLY if this host is still in the live table
             if (newSessions[hostId]) merged[hostId] = s;
           }
           for (const [id, s] of Object.entries(newSessions)) {
             const hostId = Number(id);
-            // Add new sessions for hosts not already active
             if (!merged[hostId]) merged[hostId] = s;
           }
           return merged;
@@ -1375,13 +1414,18 @@ export default function FaVidCall() {
     pollNowRef.current = () => { if (!cancelled) pollLiveSessions(); };
 
     if (!cancelled) pollLiveSessions();
-    const interval = setInterval(() => { if (!cancelled) pollLiveSessions(); }, 20_000);
+    const interval = setInterval(() => { if (!cancelled) pollLiveSessions(); }, 10_000);
     return () => {
       cancelled = true;
       pollNowRef.current = null;
       clearInterval(interval);
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, assignPooledSession]);
+
+  // When user scrolls to a new card, try to give it a pooled session
+  useEffect(() => {
+    assignPooledSession();
+  }, [activeIndex, assignPooledSession]);
 
   const fetchUsers = useCallback(async () => {
     setStatus("loading");

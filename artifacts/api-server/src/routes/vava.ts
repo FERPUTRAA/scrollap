@@ -445,16 +445,101 @@ vavaRouter.post("/vava/google-register", async (req: Request, res: Response) => 
   }
 });
 
+// ─── Normalize a raw VAVA live session object to a uniform shape ──────────────
+// VAVA API is inconsistent: field names change between versions and credentials.
+// We try every known variant to extract channel, hostId, token, etc.
+interface NormalizedLiveSession {
+  channel: string;
+  agoraToken: string | null;
+  hostUserId: number | null;
+  hostDisplayName: string;
+  hostProfilePicture: string | null;
+  viewerCount: number;
+  duration: number;
+  orderId: string | null;
+  isPrivate: boolean;
+}
+
+function normalizeLiveSession(s: Record<string, unknown>): NormalizedLiveSession | null {
+  // Channel name — all known field names
+  const channel = (
+    s.channel ?? s.channelName ?? s.channelId ?? s.roomId ?? s.roomName ??
+    s.agoraChannelId ?? s.agoraChannel ?? s.rtcChannelId ?? s.rtcChannel
+  ) as string | undefined;
+  if (!channel || typeof channel !== "string") return null;
+
+  // Agora token — prefer RTC token, fallback to VAVA auth token
+  const agoraToken = (
+    s.agoraToken ?? s.rtcToken ?? s.token ?? s.authToken ?? s.accessToken ?? s.roomToken ?? null
+  ) as string | null;
+
+  // Host user ID — multiple naming conventions
+  const rawHostId = (
+    s.hostUserId ?? s.hostId ?? s.userId ?? s.anchorId ?? s.anchorUserId ??
+    s.presenterId ?? s.streamerUserId ?? s.streamerId
+  );
+  const hostUserId = rawHostId != null ? Number(rawHostId) : null;
+
+  // Host display name
+  const hostDisplayName = (
+    s.hostDisplayName ?? s.displayName ?? s.nickName ?? s.nickname ??
+    s.userName ?? s.hostName ?? s.name ?? "Host"
+  ) as string;
+
+  // Host profile picture
+  const hostProfilePicture = (
+    s.hostProfilePicture ?? s.profilePicture ?? s.avatar ?? s.headImg ??
+    s.headPic ?? s.thumbnailUrl ?? s.coverUrl ?? s.coverImage ?? null
+  ) as string | null;
+
+  // Viewer count
+  const viewerCount = Number(
+    s.viewerCount ?? s.audienceCount ?? s.watchCount ?? s.viewCount ??
+    s.watcherCount ?? s.roomUserCount ?? 0
+  );
+
+  // Duration
+  const duration = Number(s.duration ?? s.liveTime ?? s.streamTime ?? 0);
+
+  // Order ID
+  const orderId = (s.orderId ?? s.orderNo ?? s.sessionId ?? s.liveId ?? null) as string | null;
+
+  // Private flag — check every known field
+  const isPrivate = !!(
+    s.isPrivate || s.isPrivateLive || s.privateFlag ||
+    s.sessionType === 2 || s.liveType === 2 || s.roomType === 2 ||
+    s.sessionTag === "private" || s.liveTag === "private" ||
+    s.type === 2 || s.type === "private"
+  );
+
+  return { channel, agoraToken, hostUserId, hostDisplayName, hostProfilePicture, viewerCount, duration, orderId, isPrivate };
+}
+
+// ─── Extract session list from ANY raw VAVA live table response ───────────────
+// VAVA has returned these formats historically:
+//   { data: { sessionList: [...] } }
+//   { data: { list: [...] } }
+//   { data: { sessions: [...] } }
+//   { data: [...] }  ← array directly
+//   { data: null }   ← empty
+function extractSessionList(raw: unknown): Record<string, unknown>[] {
+  if (!raw || typeof raw !== "object") return [];
+  const d = raw as Record<string, unknown>;
+  const data = d.data;
+  if (Array.isArray(data)) return data as Record<string, unknown>[];
+  if (data && typeof data === "object") {
+    const inner = data as Record<string, unknown>;
+    for (const key of ["sessionList", "list", "sessions", "data", "items", "rows", "records"]) {
+      if (Array.isArray(inner[key])) return inner[key] as Record<string, unknown>[];
+    }
+    // If data itself has channel-like fields, treat it as a single session
+    if (inner.channel || inner.channelName || inner.roomId) return [inner];
+  }
+  return [];
+}
+
 // GET /api/vava/live-sessions — get active live Agora sessions from VAVA
 vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
-  type LiveSession = {
-    orderId?: string; channel?: string; authToken?: string; agoraToken?: string;
-    hostUserId?: number; hostDisplayName?: string; hostProfilePicture?: string;
-    viewerCount?: number; duration?: number; sessionType?: number; liveType?: number;
-    isPrivate?: boolean; isPrivateLive?: boolean; privateFlag?: number;
-    sessionTag?: string; liveTag?: string; roomType?: number;
-  };
-
   try {
     // Try both credentials in parallel for maximum session coverage
     const [r1, r2] = await Promise.allSettled([
@@ -462,19 +547,19 @@ vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
       vavaGet("live/session/table/v2", "", CREDS_FALLBACK),
     ]);
 
-    const allSessions: LiveSession[] = [];
+    const allSessions: NormalizedLiveSession[] = [];
     const seenChannels = new Set<string>();
 
     for (const result of [r1, r2]) {
       if (result.status !== "fulfilled") continue;
-      const d = result.value as {
-        data?: { sessionList?: LiveSession[] };
-        failureResponse?: { status: number };
-      };
-      if (d?.failureResponse?.status === 521) continue;
-      const list = d?.data?.sessionList ?? [];
-      for (const s of list) {
-        if (s.channel && !seenChannels.has(s.channel)) {
+      const raw = result.value as Record<string, unknown>;
+      const fail = raw?.failureResponse as { status?: number } | undefined;
+      if (fail?.status === 521) continue;
+
+      const list = extractSessionList(raw);
+      for (const item of list) {
+        const s = normalizeLiveSession(item);
+        if (s && !seenChannels.has(s.channel)) {
           seenChannels.add(s.channel);
           allSessions.push(s);
         }
@@ -493,35 +578,24 @@ vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
     // uid when falling back to the VAVA token if our server token fails.
     const credUid = Number(CREDS.valid ? CREDS.userId : CREDS_FALLBACK.valid ? CREDS_FALLBACK.userId : 0);
 
-    const sessions = allSessions
-      .filter((s) => s.channel)
-      .map((s) => {
+    const sessions = allSessions.map((s) => {
         // Always generate a server-signed token for uid=0 (anonymous viewer).
-        // VAVA tokens are signed for a specific uid, so using them with uid=0 fails.
-        // Our certificate-signed token works for any uid including 0.
-        const serverToken = generateToken(AGORA_APP_ID, AGORA_APP_CERTIFICATE, s.channel!, 0);
-
-        // Detect private live sessions from various field patterns
-        const isPrivate = !!(
-          s.isPrivate || s.isPrivateLive ||
-          (typeof s.privateFlag === "number" && s.privateFlag > 0) ||
-          s.sessionType === 2 || s.liveType === 2 || s.roomType === 2 ||
-          s.sessionTag === "private" || s.liveTag === "private"
-        );
-
+        const serverToken = generateToken(AGORA_APP_ID, AGORA_APP_CERTIFICATE, s.channel, 0);
         return {
-          orderId: s.orderId ?? null,
-          channel: s.channel!,
-          token: s.agoraToken ?? s.authToken ?? null,   // VAVA token (uid-specific, fallback)
-          serverToken,                                   // Our token (uid=0, primary for viewing)
+          orderId: s.orderId,
+          channel: s.channel,
+          token: s.agoraToken,              // VAVA token (uid-specific, fallback)
+          serverToken,                      // Our token (uid=0, primary for viewing)
           appId: AGORA_APP_ID,
-          credentialUid: credUid,                        // uid that VAVA token belongs to
-          hostUserId: s.hostUserId ?? null,
-          hostDisplayName: s.hostDisplayName ?? "Host",
-          hostProfilePicture: s.hostProfilePicture ? `${VAVA_CDN}/${s.hostProfilePicture}` : null,
-          viewerCount: s.viewerCount ?? 0,
-          duration: s.duration ?? 0,
-          isPrivate,
+          credentialUid: credUid,           // uid that VAVA token belongs to
+          hostUserId: s.hostUserId,
+          hostDisplayName: s.hostDisplayName,
+          hostProfilePicture: s.hostProfilePicture
+            ? (s.hostProfilePicture.startsWith("http") ? s.hostProfilePicture : `${VAVA_CDN}/${s.hostProfilePicture}`)
+            : null,
+          viewerCount: s.viewerCount,
+          duration: s.duration,
+          isPrivate: s.isPrivate,
         };
       });
 
@@ -613,6 +687,27 @@ vavaRouter.get("/vava/live", async (_req: Request, res: Response) => {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return res.status(502).json({ success: false, error: msg });
+  }
+});
+
+// GET /api/vava/debug-live — raw VAVA live table response for debugging
+vavaRouter.get("/vava/debug-live", async (_req: Request, res: Response) => {
+  try {
+    const [r1, r2] = await Promise.allSettled([
+      vavaGet("live/session/table/v2", "", CREDS),
+      vavaGet("live/session/table/v2", "", CREDS_FALLBACK),
+    ]);
+    const raw1 = r1.status === "fulfilled" ? r1.value : { error: String(r1.reason) };
+    const raw2 = r2.status === "fulfilled" ? r2.value : { error: String(r2.reason) };
+    const list1 = extractSessionList(raw1);
+    const list2 = extractSessionList(raw2);
+    return res.json({
+      success: true,
+      primary: { raw: raw1, parsedCount: list1.length, firstItem: list1[0] ?? null },
+      fallback: { raw: raw2, parsedCount: list2.length, firstItem: list2[0] ?? null },
+    });
+  } catch (err: unknown) {
+    return res.status(502).json({ success: false, error: String(err) });
   }
 });
 
