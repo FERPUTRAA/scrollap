@@ -44,6 +44,13 @@ pnpm workspace monorepo. TikTok-clone UI dengan live feed dari Hot51 API (platfo
 - CDN nodes: bcdn1-6.livcdn.com, pull.bcdn5.livcdn.com
 - Stream URL: `https://bcdn5.livcdn.com/live/501_{roomId}_{STREAM_KEY}.flv`
 
+## Agora Credentials (dari Agora Console — user)
+
+- App ID: `2f62afc1e7df4c71957bea05f56c8cbb` (sama dengan VAVA App ID)
+- App Certificate: `6dfd8bd4e2364fa4a57c01ec9757178e` → env `AGORA_APP_CERTIFICATE`
+- Customer ID: `e5963aaa320545b4a9ce873f3fbe9627` → env `AGORA_CUSTOMER_ID`
+- Customer Secret: belum diset → env `AGORA_CUSTOMER_SECRET` (opsional, untuk listing channel)
+
 ## VAVA Credentials (dari APK decompile)
 
 - Agora App ID: `2f62afc1e7df4c71957bea05f56c8cbb`
