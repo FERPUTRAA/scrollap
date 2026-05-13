@@ -69,7 +69,7 @@ interface AgoraSession {
   token: string | null;
   uid: number;
   peerId: number | null;
-  source?: "ws" | "api" | "live_table";
+  source?: "ws" | "api" | "live_table" | "match";
 }
 
 type StreamState = "idle" | "connecting" | "connected" | "no_stream" | "error";
@@ -166,7 +166,7 @@ function playAudioViaSpeaker(track: IRemoteAudioTrack, audioElRef: React.Mutable
 }
 
 // ─── Agora viewer hook ────────────────────────────────────────────────────────
-function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null) {
+function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | null, onExpired?: () => void) {
   const clientRef = useRef<IAgoraRTCClient | null>(null);
   const remoteVideoRef = useRef<IRemoteVideoTrack | null>(null);
   const remoteAudioRef = useRef<IRemoteAudioTrack | null>(null);
@@ -308,11 +308,20 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
         if (mediaType === "audio") { remoteAudioRef.current = null; cleanupSpeaker(); }
       });
 
-      client.on("user-left", () => { if (!cancelled) setStreamState("no_stream"); });
+      client.on("user-left", () => {
+        if (!cancelled) {
+          setStreamState("no_stream");
+          // Session expired: request a fresh session after short delay
+          setTimeout(() => { if (!cancelled && onExpired) onExpired(); }, 2_000);
+        }
+      });
 
       client.on("connection-state-change", (cur: string) => {
         if (cancelled) return;
-        if (cur === "DISCONNECTED") setStreamState("no_stream");
+        if (cur === "DISCONNECTED") {
+          setStreamState("no_stream");
+          setTimeout(() => { if (!cancelled && onExpired) onExpired(); }, 2_000);
+        }
       });
 
       // Try join with multiple token strategies
@@ -321,23 +330,13 @@ function useAgoraViewer(session: AgoraSession | null, videoEl: HTMLDivElement | 
       if (cancelled) { try { await client.leave(); } catch {} return; }
 
       if (result === "error") {
-        // Tidak langsung error — tampilkan no_stream dan auto-retry 30 detik lagi
+        // Join gagal — minta sesi baru dari parent, jangan retry token lama yang sudah expired
         setStreamState("no_stream");
-        let countdown = 30;
-        setRetryIn(countdown);
-        const tick = setInterval(() => {
-          countdown--;
-          setRetryIn(countdown);
-          if (countdown <= 0) clearInterval(tick);
-        }, 1000);
-        retryTimerRef.current = setTimeout(async () => {
-          clearInterval(tick);
-          if (!cancelled) {
-            try { await client.leave(); } catch {}
-            clientRef.current = null;
-            await join();
-          }
-        }, 30_000);
+        setRetryIn(0);
+        try { await client.leave(); } catch {}
+        clientRef.current = null;
+        // Signal parent to get fresh session (not retry same expired token)
+        setTimeout(() => { if (!cancelled && onExpired) onExpired(); }, 3_000);
         return;
       }
 
@@ -604,9 +603,10 @@ interface CardProps {
   isActive: boolean;
   session: AgoraSession | null;
   wsStatus: "idle" | "connecting" | "connected" | "error";
+  onSessionExpired: () => void;
 }
 
-const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStatus }: CardProps) {
+const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStatus, onSessionExpired }: CardProps) {
   const [liked, setLiked] = useState(false);
   const [showHeart, setShowHeart] = useState(false);
   const [imgError, setImgError] = useState(false);
@@ -615,7 +615,7 @@ const LiveCard = memo(function LiveCard({ user, index, isActive, session, wsStat
 
   const activeSession = isActive ? session : null;
   const { streamState, muted, toggleMute, autoplayBlocked, unblockAutoplay, retryIn } =
-    useAgoraViewer(activeSession, videoEl);
+    useAgoraViewer(activeSession, videoEl, isActive ? onSessionExpired : undefined);
 
   useEffect(() => {
     if (videoContainerRef.current) setVideoEl(videoContainerRef.current);
@@ -911,8 +911,7 @@ export default function FaVidCall() {
       .catch(() => {}); // keep true on network error
   }, []);
 
-  // Passive WS relay: when a live session arrives, assign it to the active card
-  // Use stealth UID — never expose our real VAVA userId to Agora
+  // Assign a live session to the currently active card (stealth UID always)
   const handleLiveSession = useCallback((s: AgoraSession) => {
     const stealthSession = { ...s, uid: stealthUid() };
     setActiveIndex((ai) => {
@@ -928,8 +927,51 @@ export default function FaVidCall() {
 
   const wsStatus = useVavaRelay(handleLiveSession);
 
-  // Poll live sessions from VAVA live session table every 20s
-  // This is STEALTH: we only READ the session table, never call the matching API
+  // ── Session expiry handler ─────────────────────────────────────────────────
+  // Called by LiveCard when Agora disconnects — clears stale session so matching
+  // poll gets a fresh one immediately.
+  const handleSessionExpired = useCallback((userId: number) => {
+    setSessions((prev) => {
+      const next = { ...prev };
+      delete next[userId];
+      return next;
+    });
+  }, []);
+
+  // ── Matching poll ──────────────────────────────────────────────────────────
+  // This is the PRIMARY mechanism to get live streams.
+  // VAVA matching connects us to a host's Agora channel as silent audience.
+  // We use a stealth random UID so VAVA cannot identify us.
+  useEffect(() => {
+    let cancelled = false;
+
+    const tryMatch = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`${BASE}/api/vava/session`, { method: "POST" });
+        const data = await res.json() as {
+          success: boolean; waiting?: boolean;
+          channel?: string; token?: string | null; uid?: number; peerId?: number | null;
+        };
+        if (data.success && data.channel && !cancelled) {
+          handleLiveSession({
+            channel: data.channel,
+            token: data.token ?? null,
+            uid: data.uid ?? 0,
+            peerId: data.peerId ?? null,
+            source: "match",
+          });
+        }
+      } catch {}
+    };
+
+    const t = setTimeout(tryMatch, 800);
+    const interval = setInterval(tryMatch, 10_000);
+    return () => { cancelled = true; clearTimeout(t); clearInterval(interval); };
+  }, [handleLiveSession]);
+
+  // Poll live sessions from VAVA live session table every 20s (bonus — may return data)
+  // STEALTH: only reads the table, never creates a session
   useEffect(() => {
     let cancelled = false;
 
@@ -1174,7 +1216,8 @@ export default function FaVidCall() {
           return (
             <div key={user.userId} className="relative w-full"
               style={{ height: "100svh", scrollSnapAlign: "start", scrollSnapStop: "always" }}>
-              <LiveCard user={user} index={i} isActive={i === activeIndex} session={session} wsStatus={wsStatus} />
+              <LiveCard user={user} index={i} isActive={i === activeIndex} session={session} wsStatus={wsStatus}
+                onSessionExpired={() => handleSessionExpired(user.userId)} />
               {/* Dot indicator */}
               <div className="absolute left-3 top-1/2 -translate-y-1/2 flex flex-col gap-1.5 z-20"
                 style={{ display: effectiveUsers.length <= 10 ? "flex" : "none" }}>
