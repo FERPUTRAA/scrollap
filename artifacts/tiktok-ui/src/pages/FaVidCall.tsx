@@ -748,17 +748,18 @@ export default function FaVidCall() {
   const [errorMsg, setErrorMsg] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [sessions, setSessions] = useState<Record<number, AgoraSession>>({});
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(true);
   const feedRef = useRef<HTMLDivElement>(null);
 
-  // Check auth status on mount
+  // Check auth status on mount (non-blocking — default to authenticated)
   useEffect(() => {
     fetch(`${BASE}/api/vava/status`)
       .then((r) => r.json())
       .then((d: { authenticated?: boolean }) => {
-        setIsAuthenticated(d.authenticated ?? false);
+        // Only mark unauthenticated if server explicitly says so
+        if (d.authenticated === false) setIsAuthenticated(false);
       })
-      .catch(() => setIsAuthenticated(false));
+      .catch(() => {}); // keep true on network error
   }, []);
 
   // Passive WS relay: when a live session arrives, assign it to the active card
@@ -778,7 +779,6 @@ export default function FaVidCall() {
 
   // Poll live sessions from VAVA live session table every 30s
   useEffect(() => {
-    if (!isAuthenticated) return;
     let cancelled = false;
 
     const pollLiveSessions = async () => {
@@ -813,15 +813,12 @@ export default function FaVidCall() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [isAuthenticated]);
 
-  // Poll for matching sessions every 15s
+  // Poll for matching sessions every 12s (no attempt limit)
   useEffect(() => {
-    if (!isAuthenticated) return;
     let cancelled = false;
-    let attempts = 0;
 
     const tryMatch = async () => {
-      if (cancelled || attempts > 5) return;
-      attempts++;
+      if (cancelled) return;
       try {
         const res = await fetch(`${BASE}/api/vava/session`, { method: "POST" });
         const data = await res.json() as {
@@ -829,15 +826,14 @@ export default function FaVidCall() {
         };
         if (data.success && data.channel) {
           handleLiveSession({ channel: data.channel, token: data.token ?? null, uid: data.uid ?? 0, peerId: data.peerId ?? null, source: "api" });
-          attempts = 0;
         }
       } catch {}
     };
 
-    const interval = setInterval(() => { if (!cancelled) tryMatch(); }, 15_000);
-    setTimeout(() => { if (!cancelled) tryMatch(); }, 2000);
+    const interval = setInterval(() => { if (!cancelled) tryMatch(); }, 12_000);
+    setTimeout(() => { if (!cancelled) tryMatch(); }, 800);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [isAuthenticated, handleLiveSession]);
+  }, [handleLiveSession]);
 
   const fetchUsers = useCallback(async () => {
     setStatus("loading");
@@ -901,7 +897,7 @@ export default function FaVidCall() {
   }, [activeIndex]);
 
   // Loading state
-  if (status === "loading" || isAuthenticated === null) {
+  if (status === "loading") {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4" style={{ background: "#0d1117" }}>
         <div className="w-12 h-12 rounded-full border-4 border-white/20 border-t-[#EE1D52] animate-spin" />

@@ -16,20 +16,20 @@ const PACKAGE_NAME = "com.vava.chat.web";
 const GOOGLE_CLIENT_ID = "1060452493581-svne2ukq3vk3881on4d6k09sc3a16hg1.apps.googleusercontent.com";
 
 let CREDS = {
-  authToken: process.env.VAVA_AUTH_TOKEN ?? "bf34649655074f18a425669faf312c60",
-  userId: process.env.VAVA_USER_ID ?? "13910632",
-  deviceId: process.env.VAVA_DEVICE_ID ?? "2d4b9fd3-2382-4f78-8122-8d0becdd7177",
-  nimToken: process.env.VAVA_NIM_TOKEN ?? "015311c51ec42a632508bb1ea93fba4b",
-  valid: false,
-  genderType: 1 as number, // 1=female(host), 2=male(viewer). Primary account = female host
+  authToken: process.env.VAVA_AUTH_TOKEN ?? "1f3060ad97524a16824dd0154eb7b3d4",
+  userId: process.env.VAVA_USER_ID ?? "14186923",
+  deviceId: process.env.VAVA_DEVICE_ID ?? "2b61d981-b45f-46ec-16ee-b63f4b71d186",
+  nimToken: process.env.VAVA_NIM_TOKEN ?? "94ec3828b8852283431255931e665b5b",
+  valid: true,
+  genderType: 2 as number, // 2=male viewer to watch female hosts
 };
 
 const CREDS_FALLBACK = {
-  authToken: "c2523245696c4610a13a049ca7278e05",
-  userId: "13872374",
+  authToken: "bf34649655074f18a425669faf312c60",
+  userId: "13910632",
   deviceId: "2d4b9fd3-2382-4f78-8122-8d0becdd7177",
   nimToken: "015311c51ec42a632508bb1ea93fba4b",
-  valid: false,
+  valid: true,
   genderType: 2 as number,
 };
 
@@ -144,8 +144,13 @@ async function validateCreds(): Promise<boolean> {
     vavaGet("client/recommend/female/free?locationCode=ID&offset=0&limit=1", "", CREDS_FALLBACK),
   ]);
 
-  CREDS.valid = r1.status === "fulfilled" && !(r1.value as { failureResponse?: { status: number } })?.failureResponse;
-  CREDS_FALLBACK.valid = r2.status === "fulfilled" && !(r2.value as { failureResponse?: { status: number } })?.failureResponse;
+  const v1 = r1.status === "fulfilled" && !(r1.value as { failureResponse?: { status: number } })?.failureResponse;
+  const v2 = r2.status === "fulfilled" && !(r2.value as { failureResponse?: { status: number } })?.failureResponse;
+
+  // Only mark invalid if explicitly rejected (status 521). Network errors keep existing valid state.
+  if (r1.status === "fulfilled") CREDS.valid = v1;
+  if (r2.status === "fulfilled") CREDS_FALLBACK.valid = v2;
+
   return CREDS.valid || CREDS_FALLBACK.valid;
 }
 
