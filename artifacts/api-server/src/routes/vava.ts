@@ -488,6 +488,11 @@ vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
       }
     }
 
+    // The credential uid whose VAVA token is included in each session.
+    // VAVA tokens are signed for this specific uid — frontend must use this
+    // uid when falling back to the VAVA token if our server token fails.
+    const credUid = Number(CREDS.valid ? CREDS.userId : CREDS_FALLBACK.valid ? CREDS_FALLBACK.userId : 0);
+
     const sessions = allSessions
       .filter((s) => s.channel)
       .map((s) => {
@@ -510,6 +515,7 @@ vavaRouter.get("/vava/live-sessions", async (_req: Request, res: Response) => {
           token: s.agoraToken ?? s.authToken ?? null,   // VAVA token (uid-specific, fallback)
           serverToken,                                   // Our token (uid=0, primary for viewing)
           appId: AGORA_APP_ID,
+          credentialUid: credUid,                        // uid that VAVA token belongs to
           hostUserId: s.hostUserId ?? null,
           hostDisplayName: s.hostDisplayName ?? "Host",
           hostProfilePicture: s.hostProfilePicture ? `${VAVA_CDN}/${s.hostProfilePicture}` : null,
@@ -788,9 +794,10 @@ vavaRouter.get("/vava/ws-relay", (req: Request, res: Response) => {
                     send("agora_session", {
                       appId: AGORA_APP_ID,
                       channel: creds.channel,
-                      token: creds.token,      // VAVA original token
-                      serverToken: serverToken, // our cert-signed token (fallback)
+                      token: creds.token,                        // VAVA original token (for credentialUid)
+                      serverToken: serverToken,                   // our cert-signed token (uid=0)
                       uid: 0,
+                      credentialUid: Number(activeCred.userId),  // uid that vavaToken belongs to
                       eventType,
                     });
                   }
