@@ -67,4 +67,4 @@ AGORA_APP_CERTIFICATE = "6dfd8bd4e2364fa4a57c01ec9757178e"
 AGORA_CUSTOMER_ID = "e5963aaa320545b4a9ce873f3fbe9627"
 
 [nix]
-packages = ["cargo", "psmisc", "wget"]
+packages = ["cargo", "psmisc", "wget", "run"]
