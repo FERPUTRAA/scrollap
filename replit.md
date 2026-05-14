@@ -89,6 +89,49 @@ pnpm workspace monorepo. TikTok-clone UI dengan live feed dari Hot51 API (platfo
 3. Session OK → Agora join `uid: 0` (random, hindari UID ban)
 4. Session "noCoins" → tampilkan searching overlay, WS relay kirim session saat ada
 
+## OpenCode Setup
+
+OpenCode v1.14.50 terinstall di `.local/bin/opencode-bin` (glibc binary).
+
+### Cara Pakai (dari Replit Shell)
+
+```bash
+# Launch OpenCode TUI (untuk lanjutkan kerja)
+./scripts/opencode-bridge.sh
+
+# Fix otomatis dengan perintah tertentu
+./scripts/opencode-bridge.sh --fix "Perbaiki error TypeScript di FaVidCall.tsx"
+
+# Cek status project
+./scripts/opencode-bridge.sh --status
+
+# Langsung tanpa bridge
+GOOGLE_GENERATIVE_AI_API_KEY="AIzaSy..." nix-shell -p gcc-unwrapped --run ".local/bin/opencode-bin"
+```
+
+### Config Files
+- `.opencode/opencode.json` — OpenCode project config (provider, model, plugin)
+- `.opencode/config.json` — Alias config
+- `AGENTS.md` — Context bridge dari Replit Agent ke OpenCode (selalu dibaca pertama)
+- `rtk/hooks/opencode/rtk.ts` — RTK plugin (auto-rewrite command ke rtk prefix)
+
+### Provider
+- **Model**: `google/gemini-2.0-flash` (default)
+- **API Key**: env `GOOGLE_GENERATIVE_AI_API_KEY` (Gemini key dari aiku.py)
+- **RTK Plugin**: terinstall, auto-rewrite semua bash commands ke rtk prefix
+
+### Skema Handover Replit Agent → OpenCode
+1. Replit Agent kehabisan token → user buka Replit Shell
+2. Jalankan `./scripts/opencode-bridge.sh`
+3. OpenCode baca `AGENTS.md` (context project lengkap) + `replit.md`
+4. OpenCode lanjutkan pekerjaan dengan Gemini flash, semua command pakai rtk
+5. Selesai → commit + push → Replit Agent ambil alih kembali
+
+### Install Ulang (jika binary hilang setelah restart)
+```bash
+./scripts/install-opencode.sh
+```
+
 ## User Preferences
 
 - **WAJIB**: Semua perintah shell harus menggunakan prefix `rtk`. Tidak boleh ada perintah langsung tanpa `rtk`.
