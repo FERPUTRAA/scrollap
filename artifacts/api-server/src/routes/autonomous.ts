@@ -172,7 +172,20 @@ autonomousRouter.get("/autonomous/diagnose", async (req: Request, res: Response)
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
+  let done = false;
+
+  // SSE keepalive: send comment ping every 5s so proxy/nginx doesn't close the
+  // long-running connection while waiting for OpenAI (up to 30s).
+  const pingInterval = setInterval(() => {
+    if (done) { clearInterval(pingInterval); return; }
+    try { res.write(":ping\n\n"); } catch { clearInterval(pingInterval); }
+  }, 5_000);
+
+  // Clean up on client disconnect
+  req.on("close", () => { done = true; clearInterval(pingInterval); });
+
   const send = (event: string, data: unknown) => {
+    if (done) return;
     try { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch {}
   };
 
@@ -249,6 +262,8 @@ Format output sebagai numbered list aksi yang sangat spesifik. Maksimal 200 kata
     timestamp: new Date().toISOString(),
   });
 
+  done = true;
+  clearInterval(pingInterval);
   res.end();
 });
 

@@ -93,38 +93,43 @@ export default function DevChat() {
     setLogs([]);
     setSummary(null);
 
+    // Track whether we already received the "done" event — if so, ignore any
+    // subsequent onerror fired when the server closes the SSE stream.
+    let doneReceived = false;
+
     const es = new EventSource(`${BASE}/api/autonomous/diagnose`);
     esRef.current = es;
 
     es.addEventListener("start", (e: MessageEvent) => {
-      const d = JSON.parse(e.data) as { message: string };
-      addLog("start", d);
+      try { addLog("start", JSON.parse(e.data) as { message: string }); } catch {}
     });
     es.addEventListener("thinking", (e: MessageEvent) => {
-      const d = JSON.parse(e.data) as { step: string };
-      addLog("thinking", d);
+      try { addLog("thinking", JSON.parse(e.data) as { step: string }); } catch {}
     });
     es.addEventListener("result", (e: MessageEvent) => {
-      const d = JSON.parse(e.data) as DiagResult;
-      addLog("result", d);
+      try { addLog("result", JSON.parse(e.data) as DiagResult); } catch {}
     });
     es.addEventListener("analysis", (e: MessageEvent) => {
-      const d = JSON.parse(e.data) as { content: string; model: string };
-      addLog("analysis", d);
+      try { addLog("analysis", JSON.parse(e.data) as { content: string; model: string }); } catch {}
     });
     es.addEventListener("fixes", (e: MessageEvent) => {
-      const d = JSON.parse(e.data) as { content: string };
-      addLog("fixes", d);
+      try { addLog("fixes", JSON.parse(e.data) as { content: string }); } catch {}
     });
     es.addEventListener("done", (e: MessageEvent) => {
-      const d = JSON.parse(e.data) as DoneSummary;
-      addLog("done", d);
-      setSummary(d);
+      try {
+        const d = JSON.parse(e.data) as DoneSummary;
+        addLog("done", d);
+        setSummary(d);
+      } catch {}
+      doneReceived = true;
       setRunning(false);
       es.close();
     });
     es.onerror = () => {
-      addLog("error", { message: "Koneksi SSE terputus" });
+      // Ignore onerror that fires right after server closes the stream normally
+      // (EventSource fires onerror on any CLOSED readyState, including normal end).
+      if (doneReceived) { es.close(); return; }
+      addLog("error", { message: "Koneksi SSE terputus — server mungkin timeout atau belum siap. Coba lagi." });
       setRunning(false);
       es.close();
     };
