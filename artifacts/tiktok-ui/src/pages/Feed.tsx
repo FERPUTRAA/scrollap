@@ -205,31 +205,52 @@ export default function Feed() {
 
       {/* Error state */}
       {status === "error" && (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 px-8">
-          <div className="flex items-center justify-center w-16 h-16 rounded-full bg-white/10">
-            <WifiOff size={32} color="#EE1D52" />
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 px-8">
+          <div className="flex items-center justify-center w-14 h-14 rounded-full"
+            style={{ background: "rgba(238,29,82,0.15)", border: "1px solid rgba(238,29,82,0.3)" }}>
+            <WifiOff size={28} color="#EE1D52" />
           </div>
           <p className="text-white text-base font-semibold text-center">
-            Gagal terhubung ke Hot51
+            Hot51 Tidak Tersedia
           </p>
-          <div className="bg-white/10 rounded-xl px-4 py-3 w-full max-w-xs">
-            <p className="text-white/60 text-xs text-center leading-relaxed flex items-start gap-1.5">
-              <AlertCircle size={12} className="mt-0.5 shrink-0 text-yellow-400" />
-              <span>{errorMsg}</span>
+          <div className="rounded-xl px-4 py-3 w-full max-w-xs"
+            style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)" }}>
+            <p className="text-white/60 text-xs text-center leading-relaxed">
+              {errorMsg || "Server Hot51 tidak bisa diakses"}
             </p>
           </div>
-          {proxyStatus === "not set" && (
-            <p className="text-white/40 text-[11px] text-center leading-relaxed max-w-xs">
-              Set <span className="text-yellow-400 font-mono">HOT51_PROXY_URL</span> ke proxy Indonesia yang aktif (socks4://IP:PORT)
+
+          {/* Proxy guidance */}
+          <div className="rounded-xl px-4 py-3 w-full max-w-xs"
+            style={{ background: "rgba(234,179,8,0.08)", border: "1px solid rgba(234,179,8,0.25)" }}>
+            <p className="text-yellow-300/80 text-[11px] text-center leading-relaxed">
+              {proxyStatus === "not set"
+                ? <>Hot51 CDN membutuhkan proxy Indonesia.<br />Set <span className="font-mono text-yellow-400">HOT51_PROXY_URL</span> di Secrets.</>
+                : <>Proxy aktif tapi tidak bisa menjangkau Hot51.<br />Coba proxy Indonesia lain atau gunakan <span className="text-cyan-300">VAVA VidCall</span> sebagai alternatif.</>
+              }
             </p>
-          )}
-          <button
-            onClick={fetchRooms}
-            className="mt-2 px-6 py-2.5 rounded-full text-sm font-bold text-white"
-            style={{ background: "#EE1D52" }}
-          >
-            Coba Lagi
-          </button>
+          </div>
+
+          <div className="flex gap-2 mt-1">
+            <button
+              onClick={fetchRooms}
+              className="px-5 py-2 rounded-full text-sm font-bold text-white"
+              style={{ background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.2)" }}
+            >
+              Coba Lagi
+            </button>
+            <button
+              onClick={fetchRooms}
+              className="px-5 py-2 rounded-full text-sm font-bold text-white"
+              style={{ background: "#EE1D52" }}
+            >
+              ↻ Refresh
+            </button>
+          </div>
+
+          <p className="text-white/25 text-[10px] text-center mt-1">
+            Gunakan tab 🎥 (Create/VAVA) untuk menonton siaran alternatif
+          </p>
         </div>
       )}
 

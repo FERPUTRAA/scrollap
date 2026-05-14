@@ -112,23 +112,41 @@ async function curlPost(
   return stdout;
 }
 
-/** Direct fetch to Hot51 API — never uses proxy */
+/** Fetch to Hot51 API — tries with proxy first, then direct */
 async function hotFetch(
   url: string,
   options: { method: string; headers: Record<string, string>; body?: string; timeoutMs?: number }
 ): Promise<unknown> {
-  const res = await undiciFetch(url, {
-    method: options.method,
-    headers: options.headers,
-    body: options.body,
-    signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
-  });
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Bad JSON (HTTP ${res.status}): ${text.slice(0, 400)}`);
+  const timeout = options.timeoutMs ?? 15_000;
+
+  // Try with proxy first (needed for geo-blocked API), then fallback to direct
+  const attempts = proxyAgent
+    ? [{ dispatcher: proxyAgent }, { dispatcher: undefined }]
+    : [{ dispatcher: undefined }];
+
+  let lastErr: Error | null = null;
+  for (const { dispatcher } of attempts) {
+    try {
+      const fetchOpts: Parameters<typeof undiciFetch>[1] = {
+        method: options.method,
+        headers: options.headers,
+        body: options.body,
+        signal: AbortSignal.timeout(timeout),
+      };
+      if (dispatcher) fetchOpts.dispatcher = dispatcher;
+      const res = await undiciFetch(url, fetchOpts);
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(`Bad JSON (HTTP ${res.status}): ${text.slice(0, 400)}`);
+      }
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error(String(e));
+      continue;
+    }
   }
+  throw lastErr ?? new Error("hotFetch failed");
 }
 
 interface RoomRecord {

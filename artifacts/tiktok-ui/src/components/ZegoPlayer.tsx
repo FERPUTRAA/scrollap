@@ -22,6 +22,7 @@ export interface ZegoPlayerProps {
   anchorId: string;
   zegoStreamId: string;
   videoEl: HTMLVideoElement | null;
+  muted?: boolean;
   onPlaying: () => void;
   onError: (msg: string) => void;
 }
@@ -69,6 +70,7 @@ export function useZegoPlayer({
   anchorId,
   zegoStreamId,
   videoEl,
+  muted = true,
   onPlaying,
   onError,
 }: ZegoPlayerProps): void {
@@ -98,7 +100,7 @@ export function useZegoPlayer({
         );
         if (!mountedRef.current) return false;
         videoEl.srcObject = stream;
-        videoEl.muted = true;
+        videoEl.muted = muted;
         videoEl.play().catch(() => {});
         playingRef.current = true;
         onPlayingRef.current();

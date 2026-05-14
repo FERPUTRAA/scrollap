@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AnimatePresence, motion } from "framer-motion";
 
 import BottomNav from "./components/BottomNav";
+import DevChat from "./components/DevChat";
 import Feed from "./pages/Feed";
 import Discover from "./pages/Discover";
 import Create from "./pages/Create";
@@ -44,6 +45,9 @@ function AppContent() {
 
         {/* Bottom Navigation */}
         <BottomNav currentPath={location} onTabChange={handleTabChange} />
+
+        {/* DevChat — Autonomous AI Debugger */}
+        <DevChat />
         
       </div>
     </div>

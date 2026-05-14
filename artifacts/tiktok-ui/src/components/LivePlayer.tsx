@@ -176,6 +176,7 @@ export default function LivePlayer({
     anchorId,
     zegoStreamId,
     videoEl: zegoActive && zegoStreamId && videoEl ? videoEl : null,
+    muted,
     onPlaying: handleZegoPlaying,
     onError: handleZegoError,
   });

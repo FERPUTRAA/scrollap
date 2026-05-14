@@ -1,0 +1,314 @@
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+interface LogEntry {
+  id: number;
+  type: "start" | "thinking" | "result" | "analysis" | "fixes" | "done" | "error";
+  timestamp: string;
+  content: unknown;
+}
+
+interface DiagResult {
+  service: string;
+  status: "ok" | "warn" | "error";
+  detail: string;
+}
+
+interface DoneSummary {
+  total: number;
+  ok: number;
+  warn: number;
+  error: number;
+  timestamp: string;
+}
+
+let logIdCounter = 0;
+function nextId() { return ++logIdCounter; }
+
+const STATUS_COLOR = { ok: "#22c55e", warn: "#f59e0b", error: "#ef4444" } as const;
+const STATUS_ICON = { ok: "✅", warn: "⚠️", error: "🔴" } as const;
+
+function ResultRow({ r }: { r: DiagResult }) {
+  return (
+    <div className="flex items-start gap-2 py-1">
+      <span className="text-sm shrink-0">{STATUS_ICON[r.status]}</span>
+      <div className="min-w-0">
+        <span className="text-white/90 text-xs font-semibold">{r.service}</span>
+        <span className="text-white/50 text-xs ml-1">—</span>
+        <span className="text-white/70 text-xs ml-1 break-words">{r.detail}</span>
+      </div>
+    </div>
+  );
+}
+
+function MarkdownText({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <div className="space-y-1">
+      {lines.map((line, i) => {
+        if (!line.trim()) return <div key={i} className="h-1" />;
+        const colored = line
+          .replace(/🔴 KRITIS:/g, '<span style="color:#ef4444;font-weight:bold">🔴 KRITIS:</span>')
+          .replace(/🟡 PERINGATAN:/g, '<span style="color:#f59e0b;font-weight:bold">🟡 PERINGATAN:</span>')
+          .replace(/🟢 OK:/g, '<span style="color:#22c55e;font-weight:bold">🟢 OK:</span>')
+          .replace(/💡 SOLUSI:/g, '<span style="color:#60a5fa;font-weight:bold">💡 SOLUSI:</span>')
+          .replace(/\*\*(.*?)\*\*/g, '<strong style="color:white">$1</strong>');
+        return (
+          <p key={i} className="text-white/80 text-xs leading-relaxed"
+            dangerouslySetInnerHTML={{ __html: colored }} />
+        );
+      })}
+    </div>
+  );
+}
+
+export default function DevChat() {
+  const [open, setOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [summary, setSummary] = useState<DoneSummary | null>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const esRef = useRef<EventSource | null>(null);
+
+  const addLog = useCallback((type: LogEntry["type"], content: unknown) => {
+    setLogs(prev => [...prev, {
+      id: nextId(),
+      type,
+      timestamp: new Date().toLocaleTimeString("id-ID"),
+      content,
+    }]);
+  }, []);
+
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs]);
+
+  const runDiagnose = useCallback(() => {
+    if (running) return;
+    setRunning(true);
+    setLogs([]);
+    setSummary(null);
+
+    const es = new EventSource(`${BASE}/api/autonomous/diagnose`);
+    esRef.current = es;
+
+    es.addEventListener("start", (e: MessageEvent) => {
+      const d = JSON.parse(e.data) as { message: string };
+      addLog("start", d);
+    });
+    es.addEventListener("thinking", (e: MessageEvent) => {
+      const d = JSON.parse(e.data) as { step: string };
+      addLog("thinking", d);
+    });
+    es.addEventListener("result", (e: MessageEvent) => {
+      const d = JSON.parse(e.data) as DiagResult;
+      addLog("result", d);
+    });
+    es.addEventListener("analysis", (e: MessageEvent) => {
+      const d = JSON.parse(e.data) as { content: string; model: string };
+      addLog("analysis", d);
+    });
+    es.addEventListener("fixes", (e: MessageEvent) => {
+      const d = JSON.parse(e.data) as { content: string };
+      addLog("fixes", d);
+    });
+    es.addEventListener("done", (e: MessageEvent) => {
+      const d = JSON.parse(e.data) as DoneSummary;
+      addLog("done", d);
+      setSummary(d);
+      setRunning(false);
+      es.close();
+    });
+    es.onerror = () => {
+      addLog("error", { message: "Koneksi SSE terputus" });
+      setRunning(false);
+      es.close();
+    };
+  }, [running, addLog]);
+
+  useEffect(() => {
+    return () => { esRef.current?.close(); };
+  }, []);
+
+  return (
+    <>
+      {/* Floating button */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="fixed z-[9999] flex items-center gap-1.5 px-3 py-2 rounded-full text-white text-xs font-bold shadow-lg transition-all active:scale-95"
+        style={{
+          bottom: "80px",
+          right: "12px",
+          background: open ? "rgba(30,30,50,0.95)" : "linear-gradient(135deg,#6366f1,#8b5cf6)",
+          border: "1px solid rgba(139,92,246,0.5)",
+          backdropFilter: "blur(10px)",
+        }}
+      >
+        <span style={{ fontSize: 14 }}>🤖</span>
+        <span>{open ? "Tutup" : "DevChat"}</span>
+        {summary && !open && (
+          <span className="w-4 h-4 rounded-full text-[9px] flex items-center justify-center font-black"
+            style={{ background: summary.error > 0 ? "#ef4444" : summary.warn > 0 ? "#f59e0b" : "#22c55e" }}>
+            {summary.error || summary.warn || "✓"}
+          </span>
+        )}
+      </button>
+
+      {/* Panel */}
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, y: 30, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 30, scale: 0.95 }}
+            transition={{ duration: 0.2 }}
+            className="fixed z-[9998] flex flex-col overflow-hidden"
+            style={{
+              bottom: "128px",
+              right: "12px",
+              left: "12px",
+              maxHeight: "60vh",
+              borderRadius: "16px",
+              background: "rgba(10,10,20,0.97)",
+              border: "1px solid rgba(139,92,246,0.3)",
+              backdropFilter: "blur(20px)",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.7)",
+            }}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 shrink-0"
+              style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+              <div className="flex items-center gap-2">
+                <span className="text-base">🤖</span>
+                <div>
+                  <p className="text-white text-xs font-bold">DevChat — Autonomous AI Debugger</p>
+                  <p className="text-white/40 text-[10px]">OpenAI GPT-4o + Hot51 + VAVA diagnostic</p>
+                </div>
+              </div>
+              <button
+                onClick={runDiagnose}
+                disabled={running}
+                className="px-3 py-1.5 rounded-full text-white text-[11px] font-bold transition-all active:scale-95 disabled:opacity-50"
+                style={{ background: running ? "rgba(99,102,241,0.4)" : "linear-gradient(135deg,#6366f1,#8b5cf6)" }}
+              >
+                {running ? (
+                  <span className="flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-full border border-white/50 border-t-white animate-spin" />
+                    Running...
+                  </span>
+                ) : "▶ Jalankan Diagnosa"}
+              </button>
+            </div>
+
+            {/* Log area */}
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+              {logs.length === 0 && !running && (
+                <div className="flex flex-col items-center justify-center h-24 gap-2">
+                  <span className="text-3xl">🔍</span>
+                  <p className="text-white/40 text-xs text-center">
+                    Tekan "Jalankan Diagnosa" untuk memulai analisis otomatis
+                  </p>
+                  <p className="text-white/25 text-[10px] text-center">
+                    Sistem akan test Hot51, VAVA, Agora, dan Proxy<br />lalu GPT-4o analisis dan berikan solusi
+                  </p>
+                </div>
+              )}
+
+              {logs.map(log => (
+                <motion.div
+                  key={log.id}
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  {log.type === "start" && (
+                    <div className="flex items-center gap-2 py-1">
+                      <span className="text-purple-400 text-[10px] font-mono shrink-0">{log.timestamp}</span>
+                      <span className="text-purple-300 text-xs">🚀 {(log.content as { message: string }).message}</span>
+                    </div>
+                  )}
+
+                  {log.type === "thinking" && (
+                    <div className="flex items-center gap-2 py-0.5">
+                      <span className="text-white/30 text-[10px] font-mono shrink-0">{log.timestamp}</span>
+                      <div className="flex items-center gap-1.5">
+                        <div className="flex gap-0.5">
+                          {[0, 1, 2].map(i => (
+                            <div key={i} className="w-1 h-1 rounded-full bg-purple-400 animate-bounce"
+                              style={{ animationDelay: `${i * 0.15}s` }} />
+                          ))}
+                        </div>
+                        <span className="text-purple-300/70 text-[11px] italic">
+                          {(log.content as { step: string }).step}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {log.type === "result" && (
+                    <div className="pl-2" style={{ borderLeft: `2px solid ${STATUS_COLOR[(log.content as DiagResult).status]}33` }}>
+                      <ResultRow r={log.content as DiagResult} />
+                    </div>
+                  )}
+
+                  {log.type === "analysis" && (
+                    <div className="rounded-xl p-3 mt-2"
+                      style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)" }}>
+                      <p className="text-purple-300 text-[10px] font-bold mb-2 flex items-center gap-1">
+                        <span>🧠</span>
+                        GPT-4o Analysis
+                        <span className="ml-auto text-white/30 font-mono">{log.timestamp}</span>
+                      </p>
+                      <MarkdownText text={(log.content as { content: string }).content} />
+                    </div>
+                  )}
+
+                  {log.type === "fixes" && (
+                    <div className="rounded-xl p-3 mt-1"
+                      style={{ background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)" }}>
+                      <p className="text-emerald-300 text-[10px] font-bold mb-2 flex items-center gap-1">
+                        <span>🔧</span>
+                        Rekomendasi Perbaikan
+                      </p>
+                      <MarkdownText text={(log.content as { content: string }).content} />
+                    </div>
+                  )}
+
+                  {log.type === "done" && (
+                    <div className="flex items-center gap-2 py-2 mt-1">
+                      <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.06)" }} />
+                      <div className="flex items-center gap-2 text-[10px]">
+                        {[
+                          { label: "OK", count: (log.content as DoneSummary).ok, color: "#22c55e" },
+                          { label: "WARN", count: (log.content as DoneSummary).warn, color: "#f59e0b" },
+                          { label: "ERROR", count: (log.content as DoneSummary).error, color: "#ef4444" },
+                        ].map(({ label, count, color }) => (
+                          <span key={label} className="px-1.5 py-0.5 rounded font-bold"
+                            style={{ background: `${color}22`, color }}>
+                            {count} {label}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.06)" }} />
+                    </div>
+                  )}
+
+                  {log.type === "error" && (
+                    <div className="text-red-400 text-xs py-1">
+                      ⚠️ {(log.content as { message: string }).message}
+                    </div>
+                  )}
+                </motion.div>
+              ))}
+              <div ref={logEndRef} />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
+}
