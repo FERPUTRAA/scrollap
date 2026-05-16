@@ -18,7 +18,7 @@ OPENCODE_BIN="$WORKSPACE/.local/bin/opencode-bin"
 mkdir -p "$STATE_DIR"
 
 export PATH="$WORKSPACE/.local/bin:$PATH"
-export GOOGLE_GENERATIVE_AI_API_KEY="AIzaSyBzjq17LsHBt9mTNJpCKTlE0OwcYsrqqH4"
+export GOOGLE_API_KEY="${GOOGLE_API_KEY:-}"
 
 # ── Save current project snapshot ─────────────────────────────
 save_snapshot() {
@@ -96,7 +96,7 @@ launch_opencode() {
 
   cd "$WORKSPACE"
   echo "🚀 OpenCode v$(nix-shell -p gcc-unwrapped --run "$OPENCODE_BIN --version" 2>/dev/null) launching..."
-  echo "   Model: google/gemini-2.0-flash"
+  echo "   Model: qwen/qwen-plus"
   echo "   Context: AGENTS.md + replit.md"
   echo ""
 

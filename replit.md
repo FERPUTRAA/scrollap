@@ -116,8 +116,8 @@ GOOGLE_GENERATIVE_AI_API_KEY="AIzaSy..." nix-shell -p gcc-unwrapped --run ".loca
 - `rtk/hooks/opencode/rtk.ts` — RTK plugin (auto-rewrite command ke rtk prefix)
 
 ### Provider
-- **Model**: `google/gemini-2.0-flash` (default)
-- **API Key**: env `GOOGLE_GENERATIVE_AI_API_KEY` (Gemini key dari aiku.py)
+- **Model**: `qwen/qwen-plus` (default)
+- **API Key**: env `GOOGLE_API_KEY` (DashScope/Qwen API key)
 - **RTK Plugin**: terinstall, auto-rewrite semua bash commands ke rtk prefix
 
 ### Skema Handover Replit Agent → OpenCode
