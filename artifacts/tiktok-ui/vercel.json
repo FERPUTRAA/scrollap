@@ -1,0 +1,5 @@
+{
+  "version": 2,
+  "buildCommand": "cd ../.. && npm install -g pnpm && pnpm install && pnpm --filter @workspace/tiktok-ui run build",
+  "outputDirectory": "dist"
+}

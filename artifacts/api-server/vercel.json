@@ -1,0 +1,5 @@
+{
+  "version": 2,
+  "buildCommand": "cd ../.. && npm install -g pnpm && pnpm install && pnpm --filter @workspace/api-server run build",
+  "outputDirectory": "dist"
+}
