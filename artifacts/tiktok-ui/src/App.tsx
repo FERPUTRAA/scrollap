@@ -7,6 +7,7 @@ import { AnimatePresence, motion } from "framer-motion";
 
 import BottomNav from "./components/BottomNav";
 import DevChat from "./components/DevChat";
+import { SandboxPreview } from "./components/SandboxPreview";
 import Feed from "./pages/Feed";
 import Discover from "./pages/Discover";
 import Create from "./pages/Create";
@@ -39,6 +40,7 @@ function AppContent() {
             <Route path="/favidcall" component={FaVidCall} />
             <Route path="/inbox" component={Inbox} />
             <Route path="/profile" component={Profile} />
+            <Route path="/sandbox/*" component={SandboxPreview} />
             <Route component={NotFound} />
           </Switch>
         </div>
