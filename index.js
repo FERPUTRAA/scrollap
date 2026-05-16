@@ -7,13 +7,14 @@ app.use(express.json());
 app.use(cors());
 app.use(express.static(path.join(__dirname, "public")));
 
-const GEMINI_API_KEY = "AIzaSyBzjq17LsHBt9mTNJpCKTlE0OwcYsrqqH4";
+const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || "";
 const MODEL = "gemini-2.0-flash";
 const URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 app.post("/api/chat", async (req, res) => {
     const { message } = req.body;
     if (!message) return res.json({ reply: "Pesan kosong." });
+    if (!GEMINI_API_KEY) return res.json({ reply: "GOOGLE_API_KEY belum di-set di environment variables." });
 
     try {
         const response = await fetch(URL, {

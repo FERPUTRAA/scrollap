@@ -5,22 +5,18 @@ import os
 import re
 
 # ─────────────────────────────────────────
-#  KONFIGURASI — HARUS SAMA DENGAN index.js
+#  KONFIGURASI — baca dari env var
 # ─────────────────────────────────────────
 TARGET_FILE   = "index.js"
 PORT          = 9000
 MODEL_BENAR   = "gemini-2.0-flash"
-API_KEY_BENAR = "AIzaSyBzjq17LsHBt9mTNJpCKTlE0OwcYsrqqH4"
+API_KEY_BENAR = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
 ENDPOINT      = "v1beta"
 
+if not API_KEY_BENAR:
+    print("⚠️  GOOGLE_API_KEY tidak di-set. Set via: export GOOGLE_API_KEY=your_key")
+
 VALIDASI = {
-    "api_key": {
-        "pattern": r'const GEMINI_API_KEY\s*=\s*"([^"]+)"',
-        "fix": lambda c: re.sub(
-            r'const GEMINI_API_KEY\s*=\s*"[^"]+"',
-            f'const GEMINI_API_KEY = "{API_KEY_BENAR}"', c),
-        "pesan": f"⚠️  API Key tidak sesuai → diperbaiki"
-    },
     "model": {
         "pattern": r'const MODEL\s*=\s*"([^"]+)"',
         "fix": lambda c: re.sub(
@@ -71,18 +67,7 @@ def validasi_dan_perbaiki():
     for nama, aturan in VALIDASI.items():
         match = re.search(aturan["pattern"], konten)
 
-        if nama == "api_key" and match:
-            nilai = match.group(1)
-            if nilai != API_KEY_BENAR:
-                print(f"⚠️  API Key ditemukan  : {nilai[:10]}...{nilai[-4:]}")
-                print(f"   Seharusnya          : {API_KEY_BENAR[:10]}...{API_KEY_BENAR[-4:]}")
-                konten = aturan["fix"](konten)
-                ada_perbaikan = True
-                print(f"   ✅ API Key diperbaiki")
-            else:
-                print(f"✅ [api_key] cocok     : {nilai[:10]}...{nilai[-4:]}")
-
-        elif nama == "model" and match:
+        if nama == "model" and match:
             nilai = match.group(1)
             if nilai != MODEL_BENAR:
                 print(f"⚠️  Model ditemukan    : {nilai}")

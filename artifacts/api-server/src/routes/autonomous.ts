@@ -1,5 +1,9 @@
 import { Router, type Request, type Response } from "express";
 import { fetch as undiciFetch, ProxyAgent } from "undici";
+import { exec as execCmd } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(execCmd);
 
 const autonomousRouter = Router();
 
@@ -252,6 +256,14 @@ Format output sebagai numbered list aksi yang sangat spesifik. Maksimal 200 kata
     send("fixes", { content: fixes });
   }
 
+  // Compute suggested auto-fix actions based on diagnostic results
+  const suggestedActions: string[] = [];
+  const hasErrors = results.some(r => r.status === "error");
+  const hasWarn = results.some(r => r.status === "warn");
+  const depsMissing = results.some(r => r.detail.toLowerCase().includes("missing") || r.detail.toLowerCase().includes("not found"));
+  if (depsMissing) suggestedActions.push("reinstall-deps");
+  if (hasErrors || hasWarn) suggestedActions.push("restart-server");
+
   send("done", {
     summary: {
       total: results.length,
@@ -259,6 +271,7 @@ Format output sebagai numbered list aksi yang sangat spesifik. Maksimal 200 kata
       warn: results.filter(r => r.status === "warn").length,
       error: results.filter(r => r.status === "error").length,
     },
+    suggestedActions,
     timestamp: new Date().toISOString(),
   });
 
@@ -288,6 +301,46 @@ autonomousRouter.get("/autonomous/health", async (_req: Request, res: Response) 
   } catch (e) {
     res.status(500).json({ healthy: false, error: e instanceof Error ? e.message : String(e) });
   }
+});
+
+// Allowed fix actions (whitelist only — no arbitrary shell exec from frontend)
+const ALLOWED_ACTIONS: Record<string, { cmd: string; label: string }> = {
+  "reinstall-deps": {
+    cmd: "cd /home/runner/workspace && pnpm install 2>&1",
+    label: "Reinstall semua dependencies (pnpm install)",
+  },
+  "rebuild-api": {
+    cmd: "cd /home/runner/workspace/artifacts/api-server && pnpm run build 2>&1",
+    label: "Rebuild API server",
+  },
+};
+
+// POST /api/autonomous/apply-fix — run a whitelisted fix command
+autonomousRouter.post("/autonomous/apply-fix", async (req: Request, res: Response) => {
+  const { action } = req.body as { action?: string };
+  if (!action || !ALLOWED_ACTIONS[action]) {
+    res.status(400).json({ success: false, error: "Aksi tidak dikenali" });
+    return;
+  }
+  const { cmd, label } = ALLOWED_ACTIONS[action];
+  try {
+    const { stdout, stderr } = await execAsync(cmd, { timeout: 90_000 });
+    res.json({ success: true, label, output: (stdout + stderr).slice(0, 3000) });
+  } catch (e) {
+    const err = e as { stdout?: string; stderr?: string; message?: string };
+    res.status(500).json({
+      success: false,
+      label,
+      error: err.message,
+      output: ((err.stdout ?? "") + (err.stderr ?? "")).slice(0, 2000),
+    });
+  }
+});
+
+// POST /api/autonomous/restart — gracefully exit so the workflow manager restarts the server
+autonomousRouter.post("/autonomous/restart", (_req: Request, res: Response) => {
+  res.json({ success: true, message: "Server akan restart dalam 1 detik..." });
+  setTimeout(() => process.exit(0), 1000);
 });
 
 export default autonomousRouter;

@@ -21,14 +21,23 @@ interface DoneSummary {
   ok: number;
   warn: number;
   error: number;
+  suggestedActions?: string[];
   timestamp: string;
 }
+
+type RestartPhase = "idle" | "applying" | "restarting" | "reconnecting" | "online";
+
+const ACTION_LABELS: Record<string, { label: string; icon: string }> = {
+  "reinstall-deps": { label: "Reinstall Dependencies", icon: "📦" },
+  "rebuild-api":    { label: "Rebuild API Server",      icon: "🔨" },
+  "restart-server": { label: "Restart Server",          icon: "🔄" },
+};
 
 let logIdCounter = 0;
 function nextId() { return ++logIdCounter; }
 
 const STATUS_COLOR = { ok: "#22c55e", warn: "#f59e0b", error: "#ef4444" } as const;
-const STATUS_ICON = { ok: "✅", warn: "⚠️", error: "🔴" } as const;
+const STATUS_ICON  = { ok: "✅", warn: "⚠️", error: "🔴" } as const;
 
 function ResultRow({ r }: { r: DiagResult }) {
   return (
@@ -50,11 +59,11 @@ function MarkdownText({ text }: { text: string }) {
       {lines.map((line, i) => {
         if (!line.trim()) return <div key={i} className="h-1" />;
         const colored = line
-          .replace(/🔴 KRITIS:/g, '<span style="color:#ef4444;font-weight:bold">🔴 KRITIS:</span>')
+          .replace(/🔴 KRITIS:/g,    '<span style="color:#ef4444;font-weight:bold">🔴 KRITIS:</span>')
           .replace(/🟡 PERINGATAN:/g, '<span style="color:#f59e0b;font-weight:bold">🟡 PERINGATAN:</span>')
-          .replace(/🟢 OK:/g, '<span style="color:#22c55e;font-weight:bold">🟢 OK:</span>')
-          .replace(/💡 SOLUSI:/g, '<span style="color:#60a5fa;font-weight:bold">💡 SOLUSI:</span>')
-          .replace(/\*\*(.*?)\*\*/g, '<strong style="color:white">$1</strong>');
+          .replace(/🟢 OK:/g,         '<span style="color:#22c55e;font-weight:bold">🟢 OK:</span>')
+          .replace(/💡 SOLUSI:/g,     '<span style="color:#60a5fa;font-weight:bold">💡 SOLUSI:</span>')
+          .replace(/\*\*(.*?)\*\*/g,  '<strong style="color:white">$1</strong>');
         return (
           <p key={i} className="text-white/80 text-xs leading-relaxed"
             dangerouslySetInnerHTML={{ __html: colored }} />
@@ -65,12 +74,16 @@ function MarkdownText({ text }: { text: string }) {
 }
 
 export default function DevChat() {
-  const [open, setOpen] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [summary, setSummary] = useState<DoneSummary | null>(null);
+  const [open, setOpen]           = useState(false);
+  const [running, setRunning]     = useState(false);
+  const [logs, setLogs]           = useState<LogEntry[]>([]);
+  const [summary, setSummary]     = useState<DoneSummary | null>(null);
+  const [actions, setActions]     = useState<string[]>([]);
+  const [applyLog, setApplyLog]   = useState<string>("");
+  const [restartPhase, setRestartPhase] = useState<RestartPhase>("idle");
+  const [countdown, setCountdown] = useState(5);
   const logEndRef = useRef<HTMLDivElement>(null);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef     = useRef<EventSource | null>(null);
 
   const addLog = useCallback((type: LogEntry["type"], content: unknown) => {
     setLogs(prev => [...prev, {
@@ -82,58 +95,109 @@ export default function DevChat() {
   }, []);
 
   useEffect(() => {
-    if (logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [logs]);
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs, applyLog]);
 
   const runDiagnose = useCallback(() => {
     if (running) return;
     setRunning(true);
     setLogs([]);
     setSummary(null);
+    setActions([]);
+    setApplyLog("");
+    setRestartPhase("idle");
 
-    // Track whether we already received the "done" event — if so, ignore any
-    // subsequent onerror fired when the server closes the SSE stream.
     let doneReceived = false;
-
     const es = new EventSource(`${BASE}/api/autonomous/diagnose`);
     esRef.current = es;
 
-    es.addEventListener("start", (e: MessageEvent) => {
-      try { addLog("start", JSON.parse(e.data) as { message: string }); } catch {}
-    });
-    es.addEventListener("thinking", (e: MessageEvent) => {
-      try { addLog("thinking", JSON.parse(e.data) as { step: string }); } catch {}
-    });
-    es.addEventListener("result", (e: MessageEvent) => {
-      try { addLog("result", JSON.parse(e.data) as DiagResult); } catch {}
-    });
-    es.addEventListener("analysis", (e: MessageEvent) => {
-      try { addLog("analysis", JSON.parse(e.data) as { content: string; model: string }); } catch {}
-    });
-    es.addEventListener("fixes", (e: MessageEvent) => {
-      try { addLog("fixes", JSON.parse(e.data) as { content: string }); } catch {}
-    });
+    es.addEventListener("start",    (e: MessageEvent) => { try { addLog("start",    JSON.parse(e.data)); } catch {} });
+    es.addEventListener("thinking", (e: MessageEvent) => { try { addLog("thinking", JSON.parse(e.data)); } catch {} });
+    es.addEventListener("result",   (e: MessageEvent) => { try { addLog("result",   JSON.parse(e.data)); } catch {} });
+    es.addEventListener("analysis", (e: MessageEvent) => { try { addLog("analysis", JSON.parse(e.data)); } catch {} });
+    es.addEventListener("fixes",    (e: MessageEvent) => { try { addLog("fixes",    JSON.parse(e.data)); } catch {} });
+
     es.addEventListener("done", (e: MessageEvent) => {
       try {
         const d = JSON.parse(e.data) as DoneSummary;
         addLog("done", d);
         setSummary(d);
+        setActions(d.suggestedActions ?? []);
       } catch {}
       doneReceived = true;
       setRunning(false);
       es.close();
     });
+
     es.onerror = () => {
-      // Ignore onerror that fires right after server closes the stream normally
-      // (EventSource fires onerror on any CLOSED readyState, including normal end).
       if (doneReceived) { es.close(); return; }
       addLog("error", { message: "Koneksi SSE terputus — server mungkin timeout atau belum siap. Coba lagi." });
       setRunning(false);
       es.close();
     };
   }, [running, addLog]);
+
+  // Apply a whitelisted fix action then restart
+  const applyFix = useCallback(async (action: string) => {
+    if (restartPhase !== "idle") return;
+
+    if (action === "restart-server") {
+      await doRestart();
+      return;
+    }
+
+    setRestartPhase("applying");
+    setApplyLog(`⏳ Menjalankan: ${ACTION_LABELS[action]?.label ?? action}...\n`);
+
+    try {
+      const res = await fetch(`${BASE}/api/autonomous/apply-fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const d = await res.json() as { success: boolean; label?: string; output?: string; error?: string };
+      setApplyLog(prev => prev + (d.success ? `✅ ${d.label}\n` : `❌ Error: ${d.error}\n`) + (d.output ?? ""));
+      if (d.success) {
+        await doRestart();
+      } else {
+        setRestartPhase("idle");
+      }
+    } catch (e) {
+      setApplyLog(prev => prev + `❌ Gagal menghubungi server: ${e instanceof Error ? e.message : String(e)}`);
+      setRestartPhase("idle");
+    }
+  }, [restartPhase]);
+
+  async function doRestart() {
+    setRestartPhase("restarting");
+    setApplyLog(prev => prev + "\n🔄 Mengirim sinyal restart ke server...\n");
+    try {
+      await fetch(`${BASE}/api/autonomous/restart`, { method: "POST" });
+    } catch {}
+
+    // Countdown then reconnect
+    setRestartPhase("reconnecting");
+    setCountdown(5);
+    let secs = 5;
+    const timer = setInterval(() => {
+      secs--;
+      setCountdown(secs);
+      if (secs <= 0) clearInterval(timer);
+    }, 1000);
+
+    // Poll health every 2s until server is back
+    await new Promise(resolve => setTimeout(resolve, 5500));
+    const start = Date.now();
+    while (Date.now() - start < 30_000) {
+      try {
+        const r = await fetch(`${BASE}/api/autonomous/health`);
+        if (r.ok) { setRestartPhase("online"); return; }
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    setRestartPhase("idle");
+    setApplyLog(prev => prev + "\n⚠️ Server belum merespon setelah 30 detik.");
+  }
 
   useEffect(() => {
     return () => { esRef.current?.close(); };
@@ -176,7 +240,7 @@ export default function DevChat() {
               bottom: "128px",
               right: "12px",
               left: "12px",
-              maxHeight: "60vh",
+              maxHeight: "65vh",
               borderRadius: "16px",
               background: "rgba(10,10,20,0.97)",
               border: "1px solid rgba(139,92,246,0.3)",
@@ -196,7 +260,7 @@ export default function DevChat() {
               </div>
               <button
                 onClick={runDiagnose}
-                disabled={running}
+                disabled={running || restartPhase !== "idle"}
                 className="px-3 py-1.5 rounded-full text-white text-[11px] font-bold transition-all active:scale-95 disabled:opacity-50"
                 style={{ background: running ? "rgba(99,102,241,0.4)" : "linear-gradient(135deg,#6366f1,#8b5cf6)" }}
               >
@@ -288,8 +352,8 @@ export default function DevChat() {
                       <div className="flex-1 h-px" style={{ background: "rgba(255,255,255,0.06)" }} />
                       <div className="flex items-center gap-2 text-[10px]">
                         {[
-                          { label: "OK", count: (log.content as DoneSummary).ok, color: "#22c55e" },
-                          { label: "WARN", count: (log.content as DoneSummary).warn, color: "#f59e0b" },
+                          { label: "OK",    count: (log.content as DoneSummary).ok,    color: "#22c55e" },
+                          { label: "WARN",  count: (log.content as DoneSummary).warn,  color: "#f59e0b" },
                           { label: "ERROR", count: (log.content as DoneSummary).error, color: "#ef4444" },
                         ].map(({ label, count, color }) => (
                           <span key={label} className="px-1.5 py-0.5 rounded font-bold"
@@ -309,6 +373,82 @@ export default function DevChat() {
                   )}
                 </motion.div>
               ))}
+
+              {/* Auto-fix action buttons */}
+              {actions.length > 0 && restartPhase === "idle" && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="rounded-xl p-3 mt-2 space-y-2"
+                  style={{ background: "rgba(251,146,60,0.08)", border: "1px solid rgba(251,146,60,0.25)" }}
+                >
+                  <p className="text-orange-300 text-[10px] font-bold flex items-center gap-1">
+                    <span>⚡</span> Terapkan Perbaikan Otomatis
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {actions.map(action => {
+                      const info = ACTION_LABELS[action] ?? { label: action, icon: "🔧" };
+                      return (
+                        <button
+                          key={action}
+                          onClick={() => applyFix(action)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-white text-[11px] font-bold transition-all active:scale-95"
+                          style={{ background: "linear-gradient(135deg,#f59e0b,#ef4444)" }}
+                        >
+                          <span>{info.icon}</span>
+                          <span>{info.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Apply log output */}
+              {applyLog && (
+                <div className="rounded-xl p-3 mt-1"
+                  style={{ background: "rgba(0,0,0,0.5)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                  <pre className="text-white/60 text-[10px] font-mono whitespace-pre-wrap break-all leading-relaxed">
+                    {applyLog}
+                  </pre>
+                </div>
+              )}
+
+              {/* Restart / reconnect state */}
+              {restartPhase === "restarting" && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  className="flex flex-col items-center gap-2 py-4">
+                  <div className="w-6 h-6 rounded-full border-2 border-purple-400 border-t-transparent animate-spin" />
+                  <p className="text-purple-300 text-xs">Merestart server...</p>
+                </motion.div>
+              )}
+
+              {restartPhase === "reconnecting" && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                  className="flex flex-col items-center gap-2 py-4">
+                  <div className="w-10 h-10 rounded-full flex items-center justify-center text-xl font-black"
+                    style={{ background: "rgba(99,102,241,0.2)", border: "2px solid #6366f1", color: "#a5b4fc" }}>
+                    {countdown > 0 ? countdown : "…"}
+                  </div>
+                  <p className="text-purple-300 text-xs">Menunggu server online...</p>
+                </motion.div>
+              )}
+
+              {restartPhase === "online" && (
+                <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}
+                  className="flex flex-col items-center gap-2 py-4">
+                  <span className="text-3xl">✅</span>
+                  <p className="text-emerald-400 text-xs font-bold">Server online kembali!</p>
+                  <button
+                    onClick={() => { setRestartPhase("idle"); setActions([]); setApplyLog(""); runDiagnose(); }}
+                    className="px-4 py-1.5 rounded-full text-white text-[11px] font-bold mt-1"
+                    style={{ background: "linear-gradient(135deg,#22c55e,#16a34a)" }}
+                  >
+                    ▶ Diagnosa Ulang
+                  </button>
+                </motion.div>
+              )}
+
               <div ref={logEndRef} />
             </div>
           </motion.div>
