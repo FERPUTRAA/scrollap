@@ -100,6 +100,8 @@ export default function DevChat() {
 
   const runDiagnose = useCallback(() => {
     if (running) return;
+    // Close any existing SSE before starting new one
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
     setRunning(true);
     setLogs([]);
     setSummary(null);
@@ -169,34 +171,45 @@ export default function DevChat() {
   }, [restartPhase]);
 
   async function doRestart() {
+    // CRITICAL: close SSE connection FIRST before restarting the server,
+    // so the browser doesn't show "connection interrupted" from a dead SSE stream.
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    setRunning(false);
+
     setRestartPhase("restarting");
     setApplyLog(prev => prev + "\n🔄 Mengirim sinyal restart ke server...\n");
-    try {
-      await fetch(`${BASE}/api/autonomous/restart`, { method: "POST" });
-    } catch {}
 
-    // Countdown then reconnect
+    // Fire-and-forget — server will restart, response might not arrive
+    fetch(`${BASE}/api/autonomous/restart`, { method: "POST" }).catch(() => {});
+
+    // Give server time to receive the request and send SIGTERM (2.5s delay in server)
+    await new Promise(resolve => setTimeout(resolve, 3500));
+
+    // Countdown while waiting for server to come back up
     setRestartPhase("reconnecting");
-    setCountdown(5);
-    let secs = 5;
+    setCountdown(8);
+    let secs = 8;
     const timer = setInterval(() => {
       secs--;
-      setCountdown(secs);
+      setCountdown(Math.max(secs, 0));
       if (secs <= 0) clearInterval(timer);
     }, 1000);
 
-    // Poll health every 2s until server is back
-    await new Promise(resolve => setTimeout(resolve, 5500));
+    // Poll health every 2s until server is back (max 40s)
+    await new Promise(resolve => setTimeout(resolve, 4000));
+    clearInterval(timer);
+    setCountdown(0);
+
     const start = Date.now();
-    while (Date.now() - start < 30_000) {
+    while (Date.now() - start < 40_000) {
       try {
-        const r = await fetch(`${BASE}/api/autonomous/health`);
+        const r = await fetch(`${BASE}/api/autonomous/health`, { signal: AbortSignal.timeout(3000) });
         if (r.ok) { setRestartPhase("online"); return; }
       } catch {}
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
     setRestartPhase("idle");
-    setApplyLog(prev => prev + "\n⚠️ Server belum merespon setelah 30 detik.");
+    setApplyLog(prev => prev + "\n⚠️ Server belum merespon setelah 40 detik. Coba restart manual.");
   }
 
   useEffect(() => {

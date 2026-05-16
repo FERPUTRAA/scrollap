@@ -142,7 +142,7 @@ async function testVavaWsRelay(): Promise<DiagResult> {
 }
 
 async function callQwen(systemPrompt: string, userContent: string): Promise<string> {
-  if (!QWEN_API_KEY) return "GOOGLE_API_KEY tidak tersedia — tidak bisa analisis otomatis.";
+  if (!QWEN_API_KEY) return "GOOGLE_API_KEY belum diset — lewati analisis Qwen.";
   try {
     const res = await undiciFetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
       method: "POST",
@@ -153,18 +153,19 @@ async function callQwen(systemPrompt: string, userContent: string): Promise<stri
       body: JSON.stringify({
         model: "qwen-plus",
         temperature: 0.3,
-        max_tokens: 800,
+        max_tokens: 600,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: userContent },
         ],
       }),
-      signal: AbortSignal.timeout(30_000),
+      // Reduced from 30s to 15s — keeps SSE connection short enough to avoid proxy timeout
+      signal: AbortSignal.timeout(15_000),
     });
     const d = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
     return d.choices?.[0]?.message?.content ?? "Tidak ada respons dari Qwen.";
   } catch (e) {
-    return `Qwen error: ${e instanceof Error ? e.message : String(e)}`;
+    return `Qwen tidak merespons (${e instanceof Error ? e.message : String(e)}) — cek GOOGLE_API_KEY.`;
   }
 }
 
@@ -337,10 +338,15 @@ autonomousRouter.post("/autonomous/apply-fix", async (req: Request, res: Respons
   }
 });
 
-// POST /api/autonomous/restart — gracefully exit so the workflow manager restarts the server
+// POST /api/autonomous/restart — signal the workflow manager to restart
+// We use SIGTERM (not process.exit) so Node.js can finish in-flight requests first,
+// and Replit's workflow manager gets a clean stop signal it understands.
 autonomousRouter.post("/autonomous/restart", (_req: Request, res: Response) => {
-  res.json({ success: true, message: "Server akan restart dalam 1 detik..." });
-  setTimeout(() => process.exit(0), 1000);
+  res.json({ success: true, message: "Server akan restart..." });
+  // Flush response first, then send SIGTERM after a short delay
+  setTimeout(() => {
+    process.kill(process.pid, "SIGTERM");
+  }, 2500);
 });
 
 export default autonomousRouter;
