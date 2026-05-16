@@ -3,7 +3,7 @@ import { fetch as undiciFetch, ProxyAgent } from "undici";
 
 const autonomousRouter = Router();
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+const QWEN_API_KEY = process.env.GOOGLE_API_KEY ?? "";
 const PROXY_URL = process.env.HOT51_PROXY_URL ?? "";
 const proxyAgent = PROXY_URL ? new ProxyAgent(PROXY_URL) : undefined;
 
@@ -137,17 +137,17 @@ async function testVavaWsRelay(): Promise<DiagResult> {
   };
 }
 
-async function callOpenAI(systemPrompt: string, userContent: string): Promise<string> {
-  if (!OPENAI_API_KEY) return "OPENAI_API_KEY tidak tersedia — tidak bisa analisis otomatis.";
+async function callQwen(systemPrompt: string, userContent: string): Promise<string> {
+  if (!QWEN_API_KEY) return "GOOGLE_API_KEY tidak tersedia — tidak bisa analisis otomatis.";
   try {
-    const res = await undiciFetch("https://api.openai.com/v1/chat/completions", {
+    const res = await undiciFetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${QWEN_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o",
+        model: "qwen-plus",
         temperature: 0.3,
         max_tokens: 800,
         messages: [
@@ -158,9 +158,9 @@ async function callOpenAI(systemPrompt: string, userContent: string): Promise<st
       signal: AbortSignal.timeout(30_000),
     });
     const d = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
-    return d.choices?.[0]?.message?.content ?? "Tidak ada respons dari OpenAI.";
+    return d.choices?.[0]?.message?.content ?? "Tidak ada respons dari Qwen.";
   } catch (e) {
-    return `OpenAI error: ${e instanceof Error ? e.message : String(e)}`;
+    return `Qwen error: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
@@ -211,7 +211,7 @@ autonomousRouter.get("/autonomous/diagnose", async (req: Request, res: Response)
     await new Promise(resolve => setTimeout(resolve, 80));
   }
 
-  send("thinking", { step: "Mengirim hasil ke OpenAI GPT-4o untuk analisis mendalam..." });
+  send("thinking", { step: "Mengirim hasil ke Qwen untuk analisis mendalam..." });
 
   const systemPrompt = `Kamu adalah AI engineer expert yang menganalisis masalah pada aplikasi TikTok-clone dengan fitur:
 1. Hot51 livestreaming (FLV via CDN proxy + Zego RTC fallback)
@@ -229,12 +229,12 @@ Jawab maksimal 400 kata, fokus pada ROOT CAUSE dan SOLUSI KONKRET.`;
     `[${r.status.toUpperCase()}] ${r.service}: ${r.detail}`
   ).join("\n");
 
-  const analysis = await callOpenAI(systemPrompt, `Hasil diagnostic:\n${diagSummary}\n\nAnalisis dan berikan solusi konkret.`);
+  const analysis = await callQwen(systemPrompt, `Hasil diagnostic:\n${diagSummary}\n\nAnalisis dan berikan solusi konkret.`);
 
-  send("analysis", { content: analysis, model: "gpt-4o" });
+  send("analysis", { content: analysis, model: "qwen-plus" });
 
   // Second AI pass: generate specific code fixes
-  send("thinking", { step: "GPT-4o menyusun rekomendasi perbaikan spesifik..." });
+  send("thinking", { step: "Qwen menyusun rekomendasi perbaikan spesifik..." });
 
   const errorServices = results.filter(r => r.status === "error");
   const warnServices = results.filter(r => r.status === "warn");
@@ -245,7 +245,7 @@ ${[...errorServices, ...warnServices].map(r => `- ${r.service}: ${r.detail}`).jo
 
 Format output sebagai numbered list aksi yang sangat spesifik. Maksimal 200 kata.`;
 
-    const fixes = await callOpenAI(
+    const fixes = await callQwen(
       "Kamu adalah DevOps engineer yang memberikan instruksi perbaikan singkat dan actionable.",
       fixPrompt
     );
@@ -281,7 +281,7 @@ autonomousRouter.get("/autonomous/health", async (_req: Request, res: Response) 
     res.json({
       healthy: allOk,
       proxyConfigured: !!PROXY_URL,
-      openAiConfigured: !!OPENAI_API_KEY,
+      qwenConfigured: !!QWEN_API_KEY,
       checks: results,
       timestamp: new Date().toISOString(),
     });

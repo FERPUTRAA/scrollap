@@ -191,7 +191,7 @@ export default function DevChat() {
                 <span className="text-base">🤖</span>
                 <div>
                   <p className="text-white text-xs font-bold">DevChat — Autonomous AI Debugger</p>
-                  <p className="text-white/40 text-[10px]">OpenAI GPT-4o + Hot51 + VAVA diagnostic</p>
+                  <p className="text-white/40 text-[10px]">Qwen (OpenCode) + Hot51 + VAVA diagnostic</p>
                 </div>
               </div>
               <button
@@ -218,7 +218,7 @@ export default function DevChat() {
                     Tekan "Jalankan Diagnosa" untuk memulai analisis otomatis
                   </p>
                   <p className="text-white/25 text-[10px] text-center">
-                    Sistem akan test Hot51, VAVA, Agora, dan Proxy<br />lalu GPT-4o analisis dan berikan solusi
+                    Sistem akan test Hot51, VAVA, Agora, dan Proxy<br />lalu Qwen analisis dan berikan solusi
                   </p>
                 </div>
               )}
@@ -265,7 +265,7 @@ export default function DevChat() {
                       style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)" }}>
                       <p className="text-purple-300 text-[10px] font-bold mb-2 flex items-center gap-1">
                         <span>🧠</span>
-                        GPT-4o Analysis
+                        Qwen Analysis
                         <span className="ml-auto text-white/30 font-mono">{log.timestamp}</span>
                       </p>
                       <MarkdownText text={(log.content as { content: string }).content} />
